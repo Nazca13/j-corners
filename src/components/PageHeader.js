@@ -46,21 +46,24 @@ export default function PageHeader({
         {title}
       </h1>
 
-      {showCart ? (
-        <Link
-          href="/cart"
-          className="relative w-10 h-10 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
-          aria-label="Keranjang"
-        >
-          <ShoppingBag size={18} className="text-text" />
-          {cartCount > 0 && (
-            <span className="absolute -top-1 -right-1 gradient-primary text-white text-[9px] font-bold w-[18px] h-[18px] rounded-full flex items-center justify-center shadow-md animate-scale-in">
-              {cartCount}
-            </span>
+      {showCart || rightAction ? (
+        <div className="flex items-center gap-2">
+          {rightAction}
+          {showCart && (
+            <Link
+              href="/cart"
+              className="relative w-10 h-10 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
+              aria-label="Keranjang"
+            >
+              <ShoppingBag size={18} className="text-text" />
+              {cartCount > 0 && (
+                <span className="absolute -top-1 -right-1 gradient-primary text-white text-[9px] font-bold w-[18px] h-[18px] rounded-full flex items-center justify-center shadow-md animate-scale-in">
+                  {cartCount}
+                </span>
+              )}
+            </Link>
           )}
-        </Link>
-      ) : rightAction ? (
-        rightAction
+        </div>
       ) : (
         <div className="w-10" />
       )}

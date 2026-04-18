@@ -339,7 +339,7 @@ export default function AdminPage() {
     const XLSX = (await import('xlsx')).default || await import('xlsx')
     const rows = filteredOrders.map((o) => ({
       ID: o.id?.slice(0, 8).toUpperCase(),
-      Pelanggan: o.nama_pelanggan || o.nama || '-',
+      Pelanggan: o.nama_pembeli || o.nama_pelanggan || o.nama || '-',
       Status: o.status,
       Total: o.total_harga || 0,
       Metode: o.metode_bayar || '-',
@@ -524,7 +524,7 @@ export default function AdminPage() {
                       <div className="flex justify-between items-start mb-3">
                         <div className="min-w-0 flex-1">
                           <p className="text-[9px] text-text-tertiary font-mono">#{order.id?.slice(0, 8).toUpperCase()}</p>
-                          <p className="text-sm font-bold text-text truncate">{order.nama_pelanggan || order.nama || 'Pelanggan'}</p>
+                          <p className="text-sm font-bold text-text truncate">{order.nama_pembeli || order.nama_pelanggan || order.nama || 'Pelanggan'}</p>
                           <p className="text-[10px] text-text-tertiary">{fmtDate(order.created_at)} • {fmtTime(order.created_at)}</p>
                           {order.no_hp && <p className="text-[10px] text-text-secondary">HP: {order.no_hp}</p>}
                         </div>
@@ -756,7 +756,7 @@ export default function AdminPage() {
                       {filteredOrders.map((o) => (
                         <tr key={o.id} className="border-b border-border last:border-0 hover:bg-surface-alt/50">
                           <td className="px-4 py-3 font-mono text-text-secondary">#{o.id?.slice(0, 8)}</td>
-                          <td className="px-4 py-3 font-medium text-text">{o.nama_pelanggan || o.nama || '-'}</td>
+                          <td className="px-4 py-3 font-medium text-text">{o.nama_pembeli || o.nama_pelanggan || o.nama || '-'}</td>
                           <td className="px-4 py-3"><StatusBadge status={o.status} /></td>
                           <td className="px-4 py-3 text-right font-bold text-primary">{fmtRp(o.total_harga)}</td>
                           <td className="px-4 py-3 text-text-secondary">{fmtDate(o.created_at)}</td>

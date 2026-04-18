@@ -1,5 +1,5 @@
 # J-CORNERS — FULL PROJECT CODE
-# Generated: 2026-04-18 13:39:09.000568
+# Generated: 2026-04-18 14:36:53.067138
 # ================================================
 
 # ------------------------------------------------
@@ -1433,7 +1433,24 @@ export default function CartPage() {
   const [promoError, setPromoError] = useState('')
 
   useEffect(() => {
-    setCart(getLSJSON('cart', []))
+    const localCart = getLSJSON('cart', [])
+
+    /* Validate cart — remove items that admin has deleted */
+    const validateCart = async () => {
+      if (localCart.length === 0) { setCart([]); return }
+      const { data: liveProducts } = await supabase.from('products').select('id')
+      if (liveProducts) {
+        const liveIds = new Set(liveProducts.map((p) => p.id))
+        const validCart = localCart.filter((item) => liveIds.has(item.id))
+        if (validCart.length !== localCart.length) {
+          setLSJSON('cart', validCart)
+        }
+        setCart(validCart)
+      } else {
+        setCart(localCart)
+      }
+    }
+    validateCart()
 
     /* Load store settings from localStorage (set by admin) */
     const savedAddr = getLS('store_address')
@@ -1541,20 +1558,18 @@ export default function CartPage() {
         }
       }
 
-      /* Insert order */
+      /* Insert order — only use columns that exist in the orders table */
       const { data: orderData, error: orderError } = await supabase
         .from('orders')
         .insert([{
-          nama_pelanggan: nama,
-          nama: nama,
+          nama_pembeli: nama,
           no_hp: noHp,
           alamat: type === 'delivery' ? alamat : 'Pickup',
           total_harga: total,
           metode_bayar: payment,
           bukti_transfer: buktiUrl,
           items: cart.map((i) => ({ id: i.id, name: i.name, quantity: i.quantity, price: i.price })),
-          promo_code: promoApplied?.code || null,
-          discount: discount || 0,
+          status: 'Menunggu',
         }])
         .select()
 
@@ -1565,9 +1580,11 @@ export default function CartPage() {
         return
       }
 
-      /* Increment promo usage */
+      /* Increment promo usage if applied */
       if (promoApplied) {
-        await supabase.from('promo_codes').update({ usage_count: (promoApplied.usage_count || 0) + 1 }).eq('id', promoApplied.id)
+        try {
+          await supabase.from('promo_codes').update({ usage_count: (promoApplied.usage_count || 0) + 1 }).eq('id', promoApplied.id)
+        } catch (_e) { /* ignore if promo_codes table doesn't exist yet */ }
       }
 
       /* Save order ID locally */
@@ -1576,13 +1593,13 @@ export default function CartPage() {
       setLSJSON('my_orders', myOrders)
 
       /* Build WhatsApp message */
-      const items = cart.map((i) => `• ${i.name} (x${i.quantity})`).join('\n')
+      const itemsText = cart.map((i) => `• ${i.name} (x${i.quantity})`).join('\n')
       const ongkirInfo = ongkir === 0 ? 'GRATIS' : `Rp ${ongkir.toLocaleString('id-ID')}`
       const adminFeeInfo = adminFee > 0 ? `Rp ${adminFee.toLocaleString('id-ID')}` : '-'
       const msg = encodeURIComponent(
         `*ORDER BARU - J-CORNERS*\nID: ${orderData[0].id.slice(0, 8).toUpperCase()}\n\nNama: ${nama}\nHP: ${noHp}\nTipe: ${type === 'delivery' ? 'Delivery' : 'Pickup'}\n${
           type === 'delivery' ? `Alamat: ${alamat}\n` : ''
-        }Metode: ${payment.toUpperCase()}\n\n*Pesanan:*\n${items}\n\nSubtotal: Rp ${subtotal.toLocaleString('id-ID')}\nOngkir: ${ongkirInfo}${adminFee > 0 ? `\nBiaya Admin: ${adminFeeInfo}` : ''}\n*Total: Rp ${total.toLocaleString('id-ID')}*${
+        }Metode: ${payment.toUpperCase()}\n\n*Pesanan:*\n${itemsText}\n\nSubtotal: Rp ${subtotal.toLocaleString('id-ID')}\nOngkir: ${ongkirInfo}${adminFee > 0 ? `\nBiaya Admin: ${adminFeeInfo}` : ''}${discount > 0 ? `\nDiskon (${promoApplied?.code}): -Rp ${discount.toLocaleString('id-ID')}` : ''}\n*Total: Rp ${total.toLocaleString('id-ID')}*${
           buktiUrl ? `\nBukti: ${buktiUrl}` : ''
         }`
       )
@@ -2720,7 +2737,7 @@ export default function AdminPage() {
     const XLSX = (await import('xlsx')).default || await import('xlsx')
     const rows = filteredOrders.map((o) => ({
       ID: o.id?.slice(0, 8).toUpperCase(),
-      Pelanggan: o.nama_pelanggan || o.nama || '-',
+      Pelanggan: o.nama_pembeli || o.nama_pelanggan || o.nama || '-',
       Status: o.status,
       Total: o.total_harga || 0,
       Metode: o.metode_bayar || '-',
@@ -2905,7 +2922,7 @@ export default function AdminPage() {
                       <div className="flex justify-between items-start mb-3">
                         <div className="min-w-0 flex-1">
                           <p className="text-[9px] text-text-tertiary font-mono">#{order.id?.slice(0, 8).toUpperCase()}</p>
-                          <p className="text-sm font-bold text-text truncate">{order.nama_pelanggan || order.nama || 'Pelanggan'}</p>
+                          <p className="text-sm font-bold text-text truncate">{order.nama_pembeli || order.nama_pelanggan || order.nama || 'Pelanggan'}</p>
                           <p className="text-[10px] text-text-tertiary">{fmtDate(order.created_at)} • {fmtTime(order.created_at)}</p>
                           {order.no_hp && <p className="text-[10px] text-text-secondary">HP: {order.no_hp}</p>}
                         </div>
@@ -3137,7 +3154,7 @@ export default function AdminPage() {
                       {filteredOrders.map((o) => (
                         <tr key={o.id} className="border-b border-border last:border-0 hover:bg-surface-alt/50">
                           <td className="px-4 py-3 font-mono text-text-secondary">#{o.id?.slice(0, 8)}</td>
-                          <td className="px-4 py-3 font-medium text-text">{o.nama_pelanggan || o.nama || '-'}</td>
+                          <td className="px-4 py-3 font-medium text-text">{o.nama_pembeli || o.nama_pelanggan || o.nama || '-'}</td>
                           <td className="px-4 py-3"><StatusBadge status={o.status} /></td>
                           <td className="px-4 py-3 text-right font-bold text-primary">{fmtRp(o.total_harga)}</td>
                           <td className="px-4 py-3 text-text-secondary">{fmtDate(o.created_at)}</td>
@@ -3481,21 +3498,24 @@ export default function PageHeader({
         {title}
       </h1>
 
-      {showCart ? (
-        <Link
-          href="/cart"
-          className="relative w-10 h-10 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
-          aria-label="Keranjang"
-        >
-          <ShoppingBag size={18} className="text-text" />
-          {cartCount > 0 && (
-            <span className="absolute -top-1 -right-1 gradient-primary text-white text-[9px] font-bold w-[18px] h-[18px] rounded-full flex items-center justify-center shadow-md animate-scale-in">
-              {cartCount}
-            </span>
+      {showCart || rightAction ? (
+        <div className="flex items-center gap-2">
+          {rightAction}
+          {showCart && (
+            <Link
+              href="/cart"
+              className="relative w-10 h-10 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
+              aria-label="Keranjang"
+            >
+              <ShoppingBag size={18} className="text-text" />
+              {cartCount > 0 && (
+                <span className="absolute -top-1 -right-1 gradient-primary text-white text-[9px] font-bold w-[18px] h-[18px] rounded-full flex items-center justify-center shadow-md animate-scale-in">
+                  {cartCount}
+                </span>
+              )}
+            </Link>
           )}
-        </Link>
-      ) : rightAction ? (
-        rightAction
+        </div>
       ) : (
         <div className="w-10" />
       )}

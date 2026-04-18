@@ -54,7 +54,24 @@ export default function CartPage() {
   const [promoError, setPromoError] = useState('')
 
   useEffect(() => {
-    setCart(getLSJSON('cart', []))
+    const localCart = getLSJSON('cart', [])
+
+    /* Validate cart — remove items that admin has deleted */
+    const validateCart = async () => {
+      if (localCart.length === 0) { setCart([]); return }
+      const { data: liveProducts } = await supabase.from('products').select('id')
+      if (liveProducts) {
+        const liveIds = new Set(liveProducts.map((p) => p.id))
+        const validCart = localCart.filter((item) => liveIds.has(item.id))
+        if (validCart.length !== localCart.length) {
+          setLSJSON('cart', validCart)
+        }
+        setCart(validCart)
+      } else {
+        setCart(localCart)
+      }
+    }
+    validateCart()
 
     /* Load store settings from localStorage (set by admin) */
     const savedAddr = getLS('store_address')
@@ -162,20 +179,18 @@ export default function CartPage() {
         }
       }
 
-      /* Insert order */
+      /* Insert order — only use columns that exist in the orders table */
       const { data: orderData, error: orderError } = await supabase
         .from('orders')
         .insert([{
-          nama_pelanggan: nama,
-          nama: nama,
+          nama_pembeli: nama,
           no_hp: noHp,
           alamat: type === 'delivery' ? alamat : 'Pickup',
           total_harga: total,
           metode_bayar: payment,
           bukti_transfer: buktiUrl,
           items: cart.map((i) => ({ id: i.id, name: i.name, quantity: i.quantity, price: i.price })),
-          promo_code: promoApplied?.code || null,
-          discount: discount || 0,
+          status: 'Menunggu',
         }])
         .select()
 
@@ -186,9 +201,11 @@ export default function CartPage() {
         return
       }
 
-      /* Increment promo usage */
+      /* Increment promo usage if applied */
       if (promoApplied) {
-        await supabase.from('promo_codes').update({ usage_count: (promoApplied.usage_count || 0) + 1 }).eq('id', promoApplied.id)
+        try {
+          await supabase.from('promo_codes').update({ usage_count: (promoApplied.usage_count || 0) + 1 }).eq('id', promoApplied.id)
+        } catch (_e) { /* ignore if promo_codes table doesn't exist yet */ }
       }
 
       /* Save order ID locally */
@@ -197,13 +214,13 @@ export default function CartPage() {
       setLSJSON('my_orders', myOrders)
 
       /* Build WhatsApp message */
-      const items = cart.map((i) => `• ${i.name} (x${i.quantity})`).join('\n')
+      const itemsText = cart.map((i) => `• ${i.name} (x${i.quantity})`).join('\n')
       const ongkirInfo = ongkir === 0 ? 'GRATIS' : `Rp ${ongkir.toLocaleString('id-ID')}`
       const adminFeeInfo = adminFee > 0 ? `Rp ${adminFee.toLocaleString('id-ID')}` : '-'
       const msg = encodeURIComponent(
         `*ORDER BARU - J-CORNERS*\nID: ${orderData[0].id.slice(0, 8).toUpperCase()}\n\nNama: ${nama}\nHP: ${noHp}\nTipe: ${type === 'delivery' ? 'Delivery' : 'Pickup'}\n${
           type === 'delivery' ? `Alamat: ${alamat}\n` : ''
-        }Metode: ${payment.toUpperCase()}\n\n*Pesanan:*\n${items}\n\nSubtotal: Rp ${subtotal.toLocaleString('id-ID')}\nOngkir: ${ongkirInfo}${adminFee > 0 ? `\nBiaya Admin: ${adminFeeInfo}` : ''}\n*Total: Rp ${total.toLocaleString('id-ID')}*${
+        }Metode: ${payment.toUpperCase()}\n\n*Pesanan:*\n${itemsText}\n\nSubtotal: Rp ${subtotal.toLocaleString('id-ID')}\nOngkir: ${ongkirInfo}${adminFee > 0 ? `\nBiaya Admin: ${adminFeeInfo}` : ''}${discount > 0 ? `\nDiskon (${promoApplied?.code}): -Rp ${discount.toLocaleString('id-ID')}` : ''}\n*Total: Rp ${total.toLocaleString('id-ID')}*${
           buktiUrl ? `\nBukti: ${buktiUrl}` : ''
         }`
       )
