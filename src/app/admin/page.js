@@ -430,42 +430,44 @@ export default function AdminPage() {
           </button>
         </header>
 
-        <div className="p-4 lg:p-8">
+        <div className="p-4 lg:p-6 max-w-[1200px]">
           {/* ═══════════ DASHBOARD ═══════════ */}
           {activeTab === 'dashboard' && (
-            <div className="space-y-6 animate-slide-up">
+            <div className="space-y-5 animate-slide-up">
               {/* Stats Grid */}
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 {[
                   { label: 'Pesanan Hari Ini', value: todayOrders.length, icon: Package, color: 'text-primary', bg: 'bg-primary-light' },
                   { label: 'Revenue Hari Ini', value: fmtRp(todayRevenue), icon: TrendingUp, color: 'text-success', bg: 'bg-success-light' },
                   { label: 'Total Menu', value: stats.menuCount, icon: Store, color: 'text-primary', bg: 'bg-primary-light' },
-                  { label: 'Rating', value: `⭐ ${avgRating}`, icon: Star, color: 'text-accent', bg: 'bg-accent-light' },
+                  { label: 'Rating Rata-rata', value: `⭐ ${avgRating}`, icon: Star, color: 'text-accent', bg: 'bg-accent-light' },
                 ].map(({ label, value, icon: Icon, color, bg }) => (
-                  <div key={label} className={`${bg} rounded-2xl p-4 border border-border`}>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Icon size={16} className={color} />
-                      <span className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest">{label}</span>
+                  <div key={label} className={`${bg} rounded-2xl p-4 border border-border overflow-hidden`}>
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Icon size={14} className={`${color} shrink-0`} />
+                      <span className="text-[9px] font-bold text-text-tertiary uppercase tracking-wider truncate">{label}</span>
                     </div>
-                    <p className={`text-lg font-extrabold ${color}`}>{value}</p>
+                    <p className={`text-base lg:text-lg font-extrabold ${color} truncate`}>{value}</p>
                   </div>
                 ))}
               </div>
 
               {/* Revenue Chart */}
-              <div className="bg-surface rounded-3xl p-5 border border-border shadow-sm">
-                <h3 className="text-sm font-extrabold text-text mb-4 flex items-center gap-2">
-                  <BarChart3 size={16} className="text-primary" />
-                  Pendapatan 7 Hari Terakhir
-                  <span className="ml-auto text-xs font-bold text-success">{fmtRp(revenue)} total</span>
-                </h3>
-                <div className="h-48 lg:h-64">
+              <div className="bg-surface rounded-3xl p-4 lg:p-6 border border-border shadow-sm">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+                  <h3 className="text-sm font-extrabold text-text flex items-center gap-2">
+                    <BarChart3 size={16} className="text-primary shrink-0" />
+                    <span>Pendapatan 7 Hari</span>
+                  </h3>
+                  <span className="text-xs font-bold text-success bg-success-light px-3 py-1 rounded-full w-fit">{fmtRp(revenue)} total</span>
+                </div>
+                <div className="h-52 lg:h-72">
                   <Line data={chartData} options={chartOptions} />
                 </div>
               </div>
 
               {/* Order Status Cards */}
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
                 {[
                   { label: 'Menunggu', value: stats.pending, icon: Clock, color: 'text-primary', bg: 'bg-primary-light' },
                   { label: 'Diproses', value: stats.processing, icon: Package, color: 'text-primary', bg: 'bg-primary-light' },
@@ -474,21 +476,21 @@ export default function AdminPage() {
                 ].map(({ label, value, icon: Icon, color, bg }) => (
                   <div key={label} className={`${bg} rounded-2xl p-3 text-center border border-border`}>
                     <Icon size={16} className={`${color} mx-auto mb-1`} />
-                    <p className={`text-lg font-extrabold ${color}`}>{value}</p>
-                    <p className="text-[8px] font-bold text-text-tertiary uppercase tracking-widest">{label}</p>
+                    <p className={`text-xl font-extrabold ${color}`}>{value}</p>
+                    <p className="text-[9px] font-bold text-text-tertiary uppercase tracking-wider mt-0.5">{label}</p>
                   </div>
                 ))}
               </div>
 
               {/* Recent Reviews */}
               {reviews.length > 0 && (
-                <div className="bg-surface rounded-3xl p-5 border border-border shadow-sm">
+                <div className="bg-surface rounded-3xl p-4 lg:p-6 border border-border shadow-sm">
                   <h3 className="text-sm font-extrabold text-text mb-3 flex items-center gap-2">
                     <Star size={16} className="text-accent" />
                     Review Terbaru
                   </h3>
-                  <div className="space-y-3">
-                    {reviews.slice(0, 5).map((r) => (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                    {reviews.slice(0, 6).map((r) => (
                       <div key={r.id} className="flex items-start gap-3 bg-surface-alt p-3 rounded-xl border border-border">
                         <div className="shrink-0 text-accent text-xs font-bold">
                           {'⭐'.repeat(r.rating)}
