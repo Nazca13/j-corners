@@ -26,6 +26,7 @@ export {
   Upload,
   Download,
   Eye,
+  EyeOff,
   
   // Content
   Clock,

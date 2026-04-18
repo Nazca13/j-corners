@@ -1,12 +1,14 @@
 import { createClient } from '@supabase/supabase-js'
 
-// Singleton pattern — prevents multiple GoTrueClient instances
-let _supabase = null
+// Use globalThis to survive Turbopack HMR re-evaluations
+const GLOBAL_KEY = '__jcorners_supabase__'
 
 function getSupabase() {
-  if (_supabase) return _supabase
+  if (typeof globalThis !== 'undefined' && globalThis[GLOBAL_KEY]) {
+    return globalThis[GLOBAL_KEY]
+  }
 
-  _supabase = createClient(
+  const client = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     {
@@ -15,11 +17,16 @@ function getSupabase() {
         storageKey: 'jcorners-auth',
         storage: typeof window !== 'undefined' ? window.localStorage : undefined,
         autoRefreshToken: true,
-        detectSessionInUrl: true,
+        detectSessionInUrl: false,
       },
     }
   )
-  return _supabase
+
+  if (typeof globalThis !== 'undefined') {
+    globalThis[GLOBAL_KEY] = client
+  }
+
+  return client
 }
 
 export const supabase = getSupabase()
