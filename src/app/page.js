@@ -115,7 +115,7 @@ const FALLBACK_REVIEWS = [
 /* ─── Store Info (from admin settings via localStorage) ─── */
 const STORE_DEFAULTS = {
   address: 'Jl. Telekomunikasi No. 1, Sukapura, Dayeuhkolot, Bandung, Jawa Barat 40257',
-  phone: '628123456789',
+  phone: '6285137610502',
   lat: -6.9733,
   lng: 107.6307,
 }

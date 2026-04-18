@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
@@ -16,7 +16,7 @@ import {
 
 /* Alamat toko default — admin bisa update di dashboard */
 const DEFAULT_STORE_ADDRESS = 'Jl. Telekomunikasi No. 1, Sukapura, Dayeuhkolot, Bandung, Jawa Barat 40257'
-const DEFAULT_WA = '628123456789'
+const DEFAULT_WA = '6285137610502'
 
 /* Ongkir logic: gratis ≥ 40rb, Rp 5rb untuk 25-39rb, Rp 10rb < 25rb */
 const getOngkir = (subtotal, type) => {
@@ -44,14 +44,19 @@ export default function CartPage() {
   const [storeAddress, setStoreAddress] = useState(DEFAULT_STORE_ADDRESS)
   const [storeWa, setStoreWa] = useState(DEFAULT_WA)
   const [qrisUrl, setQrisUrl] = useState('')
-  const [bankAccount, setBankAccount] = useState('')
-  const [bankName, setBankName] = useState('')
+  const [bankAccounts, setBankAccounts] = useState([])
+  const [showAllBanks, setShowAllBanks] = useState(false)
 
   /* Promo */
   const [promoCode, setPromoCode] = useState('')
   const [promoApplied, setPromoApplied] = useState(null)
   const [promoLoading, setPromoLoading] = useState(false)
   const [promoError, setPromoError] = useState('')
+
+  /* Address autocomplete */
+  const [addrSuggestions, setAddrSuggestions] = useState([])
+  const [addrLoading, setAddrLoading] = useState(false)
+  const addrTimeout = useRef(null)
 
   useEffect(() => {
     const localCart = getLSJSON('cart', [])
@@ -79,9 +84,28 @@ export default function CartPage() {
     const savedWa = getLS('store_phone')
     if (savedWa) setStoreWa(savedWa)
     setQrisUrl(getLS('store_qris_url', ''))
-    setBankAccount(getLS('store_bank_account', ''))
-    setBankName(getLS('store_bank_name', ''))
+    setBankAccounts(getLSJSON('store_banks', []))
   }, [])
+
+  /* ─── Address Autocomplete (Nominatim) ─── */
+  const searchAddress = (query) => {
+    setAlamat(query)
+    if (addrTimeout.current) clearTimeout(addrTimeout.current)
+    if (query.length < 5) { setAddrSuggestions([]); return }
+    addrTimeout.current = setTimeout(async () => {
+      setAddrLoading(true)
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&countrycodes=id&limit=5&q=${encodeURIComponent(query)}`)
+        const data = await res.json()
+        setAddrSuggestions(data.map((d) => ({ display: d.display_name, lat: d.lat, lon: d.lon })))
+      } catch (_e) { setAddrSuggestions([]) }
+      setAddrLoading(false)
+    }, 600)
+  }
+  const selectAddress = (addr) => {
+    setAlamat(addr.display)
+    setAddrSuggestions([])
+  }
 
   /* ─── Cart Helpers ─── */
   const saveCart = (updated) => {
@@ -277,6 +301,7 @@ export default function CartPage() {
   }
 
   return (
+    <>
     <main className="min-h-screen bg-surface-alt pb-32 relative">
       {/* ─── Toast ─── */}
       {toast && (
@@ -348,14 +373,29 @@ export default function CartPage() {
             required
           />
           {type === 'delivery' && (
-            <FormField
-              label="Alamat Pengiriman"
-              type="textarea"
-              value={alamat}
-              onChange={(e) => setAlamat(e.target.value)}
-              placeholder="Alamat lengkap (termasuk RT/RW, kelurahan, kota)..."
-              rows={3}
-            />
+            <div className="relative">
+              <label className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest mb-2 block flex items-center gap-1.5">
+                <MapPin size={12} /> Alamat Pengiriman
+              </label>
+              <textarea
+                value={alamat}
+                onChange={(e) => searchAddress(e.target.value)}
+                placeholder="Ketik alamat, suggestions akan muncul..."
+                rows={2}
+                className="w-full px-4 py-3 bg-surface-alt rounded-xl border border-border text-sm font-medium text-text resize-none"
+              />
+              {addrLoading && <p className="text-[9px] text-text-tertiary mt-1 animate-pulse">Mencari alamat...</p>}
+              {addrSuggestions.length > 0 && (
+                <div className="absolute left-0 right-0 z-50 mt-1 bg-surface border border-border rounded-xl shadow-xl max-h-48 overflow-y-auto">
+                  {addrSuggestions.map((s, i) => (
+                    <button key={i} onClick={() => selectAddress(s)} className="w-full text-left px-4 py-3 text-xs text-text hover:bg-primary-light border-b border-border last:border-0 transition-colors">
+                      <span className="font-bold">{s.display.split(',')[0]}</span>
+                      <span className="text-text-tertiary">, {s.display.split(',').slice(1).join(',')}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -546,12 +586,21 @@ export default function CartPage() {
                 />
               )}
 
-              {/* Bank info from admin settings */}
-              {(bankName || bankAccount) && (
-                <div className="bg-surface rounded-xl p-3 border border-border text-center">
-                  <p className="text-[10px] text-text-tertiary font-bold uppercase tracking-widest mb-1">Rekening Transfer</p>
-                  {bankName && <p className="text-sm font-bold text-text">{bankName}</p>}
-                  {bankAccount && <p className="text-base font-extrabold text-primary tracking-wider">{bankAccount}</p>}
+              {/* Bank accounts from admin settings */}
+              {bankAccounts.length > 0 && bankAccounts[0].bank && (
+                <div className="space-y-2">
+                  <div className="bg-surface rounded-xl p-3 border border-border text-center">
+                    <p className="text-[10px] text-text-tertiary font-bold uppercase tracking-widest mb-1">Rekening Transfer</p>
+                    <p className="text-sm font-bold text-text">{bankAccounts[0].bank}</p>
+                    <p className="text-base font-extrabold text-primary tracking-wider">{bankAccounts[0].account}</p>
+                  </div>
+                  {bankAccounts.length > 1 && (
+                    <>
+                      <button onClick={() => setShowAllBanks(true)} className="w-full text-[10px] font-bold text-primary bg-primary-light py-2 rounded-xl btn-press">
+                        Rekening Lainnya ({bankAccounts.length - 1})
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
 
@@ -604,5 +653,26 @@ export default function CartPage() {
         </button>
       </div>
     </main>
+
+    {/* ═══ All Banks Popup ═══ */}
+    {showAllBanks && (
+      <div className="fixed inset-0 z-[9999] bg-black/50 flex items-center justify-center p-5 backdrop-blur-sm animate-fade-in" onClick={() => setShowAllBanks(false)}>
+        <div className="bg-surface w-full max-w-sm rounded-3xl p-6 shadow-2xl animate-scale-in" onClick={(e) => e.stopPropagation()}>
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-base font-extrabold text-text">Rekening Tersedia</h3>
+            <button onClick={() => setShowAllBanks(false)} className="w-8 h-8 bg-surface-alt rounded-full flex items-center justify-center btn-press"><X size={14} /></button>
+          </div>
+          <div className="space-y-3">
+            {bankAccounts.filter((b) => b.bank).map((b, i) => (
+              <div key={i} className="bg-surface-alt rounded-xl p-4 border border-border text-center">
+                <p className="text-xs font-bold text-text">{b.bank}</p>
+                <p className="text-lg font-extrabold text-primary tracking-wider mt-1">{b.account}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   )
 }
