@@ -7,7 +7,7 @@ import { supabase } from '@/lib/supabase'
 import PageHeader from '@/components/PageHeader'
 import EmptyState from '@/components/EmptyState'
 import { GridSkeleton } from '@/components/LoadingSkeleton'
-import { AlertTriangle } from '@/components/icons'
+import { AlertTriangle, RefreshCw } from '@/components/icons'
 import { getLSJSON } from '@/lib/storage'
 
 const CATEGORIES = ['Food', 'Bakery', 'Coffee', 'Non Coffee']
@@ -32,11 +32,35 @@ function MenuContent() {
     fetchProducts()
   }, [])
 
+  const refreshMenu = () => {
+    setLoading(true)
+    const cart = getLSJSON('cart', [])
+    setCartCount(cart.reduce((sum, item) => sum + (item.quantity || 1), 0))
+    const fetchProducts = async () => {
+      const { data } = await supabase.from('products').select('*')
+      setProducts(data || [])
+      setLoading(false)
+    }
+    fetchProducts()
+  }
+
   const filtered = products.filter((p) => p.category === activeCat)
 
   return (
     <>
-      <PageHeader title="Katalog Menu" showCart cartCount={cartCount} onBack={() => router.push('/')} />
+      <PageHeader
+        title="Katalog Menu"
+        showCart
+        cartCount={cartCount}
+        onBack={() => router.push('/')}
+        rightAction={
+          <div className="flex items-center gap-2">
+            <button onClick={refreshMenu} className="w-10 h-10 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press" aria-label="Refresh">
+              <RefreshCw size={16} className="text-primary" />
+            </button>
+          </div>
+        }
+      />
 
       {/* ─── Category Filter ─── */}
       <div className="px-5 py-4 sticky top-[73px] z-40 glass border-b border-border">

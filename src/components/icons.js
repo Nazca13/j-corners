@@ -11,6 +11,7 @@ export {
   ChevronLeft,
   ChevronRight,
   ArrowLeft,
+  Menu as MenuIcon,
   
   // Actions
   Plus,
@@ -23,6 +24,8 @@ export {
   RefreshCw,
   ExternalLink,
   Upload,
+  Download,
+  Eye,
   
   // Content
   Clock,
@@ -52,4 +55,15 @@ export {
   Star,
   Heart,
   ChevronDown,
+  
+  // Analytics & Admin
+  BarChart3,
+  FileText,
+  Tag,
+  Calendar,
+  TrendingUp,
+  Users,
+  Gift,
+  Settings,
+  Printer,
 } from 'lucide-react'

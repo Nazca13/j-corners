@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import {
   Clock, ShoppingBag, Store, Coffee, Cake, UtensilsCrossed, Sparkles,
-  MapPin, Navigation2, Phone, Star, Heart, Truck, CheckCircle2,
+  MapPin, Navigation2, Phone, Star, Heart, Truck, CheckCircle2, RefreshCw,
 } from '@/components/icons'
 import { GridSkeleton } from '@/components/LoadingSkeleton'
 import { getLSJSON, getLS } from '@/lib/storage'
@@ -106,10 +106,10 @@ const FEATURES = [
   },
 ]
 
-const REVIEWS = [
-  { name: 'Rina S.', text: 'Kopi nya enak banget, pengiriman cepat!', rating: 5 },
-  { name: 'Dimas A.', text: 'Bakery favorit sekeluarga. Roti nya fresh!', rating: 5 },
-  { name: 'Sari M.', text: 'Harga terjangkau, rasa ga murahan 👍', rating: 4 },
+const FALLBACK_REVIEWS = [
+  { comment: 'Kopi nya enak banget, pengiriman cepat!', rating: 5 },
+  { comment: 'Bakery favorit sekeluarga. Roti nya fresh!', rating: 5 },
+  { comment: 'Harga terjangkau, rasa ga murahan 👍', rating: 4 },
 ]
 
 /* ─── Store Info (from admin settings via localStorage) ─── */
@@ -135,6 +135,7 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true)
   const [storeAddress, setStoreAddress] = useState(STORE_DEFAULTS.address)
   const [storePhone, setStorePhone] = useState(STORE_DEFAULTS.phone)
+  const [reviews, setReviews] = useState([])
 
   useEffect(() => {
     /* One-time alert */
@@ -155,14 +156,34 @@ export default function HomePage() {
     setStoreAddress(getLS('store_address', STORE_DEFAULTS.address))
     setStorePhone(getLS('store_phone', STORE_DEFAULTS.phone))
 
-    /* Popular products */
-    const fetchPopular = async () => {
-      const { data } = await supabase.from('products').select('*').limit(4)
-      setPopular(data || [])
+    /* Popular products + reviews */
+    const fetchData = async () => {
+      const [{ data: prodData }, { data: revData }] = await Promise.all([
+        supabase.from('products').select('*').limit(4),
+        supabase.from('reviews').select('*').gte('rating', 4).order('created_at', { ascending: false }).limit(10),
+      ])
+      setPopular(prodData || [])
+      setReviews(revData && revData.length > 0 ? revData : FALLBACK_REVIEWS)
       setLoading(false)
     }
-    fetchPopular()
+    fetchData()
   }, [])
+
+  const refreshPage = () => {
+    setLoading(true)
+    const cart = getLSJSON('cart', [])
+    setCartCount(cart.reduce((sum, item) => sum + (item.quantity || 1), 0))
+    const fetchData = async () => {
+      const [{ data: prodData }, { data: revData }] = await Promise.all([
+        supabase.from('products').select('*').limit(4),
+        supabase.from('reviews').select('*').gte('rating', 4).order('created_at', { ascending: false }).limit(10),
+      ])
+      setPopular(prodData || [])
+      setReviews(revData && revData.length > 0 ? revData : FALLBACK_REVIEWS)
+      setLoading(false)
+    }
+    fetchData()
+  }
 
   const waLink = `https://wa.me/${storePhone}`
   const mapsSearchUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(storeAddress)}`
@@ -204,18 +225,27 @@ export default function HomePage() {
           <p className="text-[11px] text-text-secondary font-medium">Selamat datang di,</p>
           <h1 className="text-xl font-extrabold text-text tracking-tight">J-Corners</h1>
         </Link>
-        <Link
-          href="/cart"
-          className="relative w-11 h-11 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
-          aria-label="Keranjang"
-        >
-          <ShoppingBag size={19} className="text-text" />
-          {cartCount > 0 && (
-            <span className="absolute -top-1 -right-1 bg-primary text-white text-[9px] font-bold w-[18px] h-[18px] rounded-full flex items-center justify-center shadow-md animate-scale-in">
-              {cartCount}
-            </span>
-          )}
-        </Link>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={refreshPage}
+            className="w-11 h-11 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
+            aria-label="Refresh"
+          >
+            <RefreshCw size={17} className="text-primary" />
+          </button>
+          <Link
+            href="/cart"
+            className="relative w-11 h-11 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
+            aria-label="Keranjang"
+          >
+            <ShoppingBag size={19} className="text-text" />
+            {cartCount > 0 && (
+              <span className="absolute -top-1 -right-1 bg-primary text-white text-[9px] font-bold w-[18px] h-[18px] rounded-full flex items-center justify-center shadow-md animate-scale-in">
+                {cartCount}
+              </span>
+            )}
+          </Link>
+        </div>
       </header>
 
       {/* ─── Hero Carousel ─── */}
@@ -404,7 +434,7 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* ─── Customer Reviews ─── */}
+      {/* ─── Customer Reviews (dynamic from DB, rating ≥ 4) ─── */}
       <div className="px-5 mb-8 animate-slide-up" style={{ animationDelay: '450ms' }}>
         <div className="flex items-center gap-2 mb-4">
           <Star size={16} className="text-accent" />
@@ -412,7 +442,7 @@ export default function HomePage() {
         </div>
 
         <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide snap-x snap-mandatory">
-          {REVIEWS.map((r, i) => (
+          {reviews.map((r, i) => (
             <div
               key={i}
               className="bg-surface rounded-2xl p-4 shadow-sm border border-border min-w-[240px] snap-start shrink-0"
@@ -427,9 +457,8 @@ export default function HomePage() {
                 ))}
               </div>
               <p className="text-[11px] text-text-secondary leading-relaxed mb-3 italic">
-                &ldquo;{r.text}&rdquo;
+                &ldquo;{r.comment || r.text || 'Review pelanggan'}&rdquo;
               </p>
-              <p className="text-[10px] font-bold text-text">{r.name}</p>
             </div>
           ))}
         </div>

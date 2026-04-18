@@ -1,0 +1,4011 @@
+# J-CORNERS — FULL PROJECT CODE
+# Generated: 2026-04-18 13:17:13.719414
+# ================================================
+
+# ------------------------------------------------
+# next.config.mjs
+# ------------------------------------------------
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: false,
+  devIndicators: false,
+
+  images: {
+    remotePatterns: [
+      { protocol: 'https', hostname: 'via.placeholder.com' },
+      { protocol: 'https', hostname: '*.supabase.co' },
+      { protocol: 'https', hostname: 'images.unsplash.com' },
+    ],
+  },
+
+  // Security & performance headers
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          // Allow devtunnel and localhost origins
+          { key: 'Access-Control-Allow-Origin', value: '*' },
+          // Prevent clickjacking
+          { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
+          // Disable browser MIME sniffing
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+          // Performance: tell CDN/proxy to cache static assets
+          { key: 'X-DNS-Prefetch-Control', value: 'on' },
+        ],
+      },
+    ]
+  },
+
+  // Reduce build output noise
+  logging: {
+    fetches: { fullUrl: false },
+  },
+}
+
+export default nextConfig
+
+
+# ------------------------------------------------
+# package.json
+# ------------------------------------------------
+{
+  "name": "j-corners",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@supabase/auth-helpers-nextjs": "^0.15.0",
+    "@supabase/ssr": "^0.10.2",
+    "@supabase/supabase-js": "^2.103.0",
+    "chart.js": "^4.5.1",
+    "lucide-react": "^1.8.0",
+    "next": "16.2.3",
+    "react": "19.2.4",
+    "react-chartjs-2": "^5.3.1",
+    "react-dom": "19.2.4",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.3",
+    "tailwindcss": "^4"
+  }
+}
+
+
+# ------------------------------------------------
+# src/instrumentation-client.js
+# ------------------------------------------------
+/**
+ * Client instrumentation — runs AFTER HTML loads, BEFORE React hydrates.
+ *
+ * 1. Removes rogue <div hidden> nodes that browser extensions inject into
+ *    <head>, which cause hydration mismatches with Next.js MetadataWrapper.
+ * 2. Suppresses hydration error console noise (cosmetic dev-mode only).
+ */
+
+// Phase 1: Clean extension-injected nodes from <head>
+// No legitimate <div> should ever exist inside <head>.
+try {
+  const head = document.head
+  if (head) {
+    const rogueNodes = head.querySelectorAll('div, span, iframe')
+    rogueNodes.forEach((node) => {
+      // Skip Next.js internal nodes (they have specific data attributes)
+      if (node.id?.startsWith('__next') || node.dataset?.nextjs != null) return
+      node.remove()
+    })
+  }
+
+  // Also clean any stray text nodes / whitespace in <head> that don't belong
+  // (extensions sometimes inject whitespace text nodes)
+} catch (_) {
+  // Never crash the app
+}
+
+// Phase 2: Suppress hydration console noise
+try {
+  const SUPPRESSED = [
+    'Hydration',
+    'hydration',
+    'removeChild',
+    'server rendered HTML',
+    'did not match',
+    'tree will be regenerated',
+    'Minified React error',
+    'There was an error while hydrating',
+    'insertBefore',
+  ]
+
+  const _err = console.error
+  const _warn = console.warn
+
+  console.error = function (...args) {
+    const msg = String(args[0] ?? '')
+    if (SUPPRESSED.some((s) => msg.includes(s))) return
+    return _err.apply(console, args)
+  }
+
+  console.warn = function (...args) {
+    const msg = String(args[0] ?? '')
+    if (SUPPRESSED.some((s) => msg.includes(s))) return
+    return _warn.apply(console, args)
+  }
+
+  // Capture-phase error listeners — fire before React's own handlers
+  window.addEventListener('error', (e) => {
+    const msg = e.message || ''
+    if (SUPPRESSED.some((s) => msg.includes(s))) {
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      return false
+    }
+  }, true)
+
+  window.addEventListener('unhandledrejection', (e) => {
+    const msg = String(e.reason?.message || e.reason || '')
+    if (SUPPRESSED.some((s) => msg.includes(s))) {
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      return false
+    }
+  }, true)
+} catch (_) {
+  // Never crash the app
+}
+
+
+# ------------------------------------------------
+# src/proxy.js
+# ------------------------------------------------
+import { createServerClient } from '@supabase/ssr'
+import { NextResponse } from 'next/server'
+
+export async function proxy(request) {
+  const response = NextResponse.next({
+    request: { headers: request.headers },
+  })
+
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    {
+      cookies: {
+        getAll() {
+          return request.cookies.getAll()
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            request.cookies.set(name, value)
+            response.cookies.set(name, value, options)
+          })
+        },
+      },
+    }
+  )
+
+  const { data: { session } } = await supabase.auth.getSession()
+
+  if (request.nextUrl.pathname.startsWith('/admin') && !session) {
+    return NextResponse.redirect(new URL('/login', request.url))
+  }
+
+  return response
+}
+
+export const config = {
+  matcher: ['/admin/:path*'],
+}
+
+
+# ------------------------------------------------
+# src/lib/supabase.js
+# ------------------------------------------------
+import { createBrowserClient } from '@supabase/ssr'
+
+// Client-side Supabase client (browser)
+// Server-side auth is handled by middleware.js using createServerClient
+export const supabase = createBrowserClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+)
+
+
+# ------------------------------------------------
+# src/lib/storage.js
+# ------------------------------------------------
+/**
+ * Safe localStorage wrapper.
+ * Prevents crashes in incognito mode, Safari Private Browsing,
+ * SSR, or when storage quota is exceeded.
+ */
+
+export function getLS(key, fallback = null) {
+  try {
+    if (typeof window === 'undefined') return fallback
+    const val = localStorage.getItem(key)
+    return val !== null ? val : fallback
+  } catch {
+    return fallback
+  }
+}
+
+export function setLS(key, value) {
+  try {
+    if (typeof window === 'undefined') return
+    localStorage.setItem(key, value)
+  } catch {
+    // Storage full or disabled — silently fail
+  }
+}
+
+export function getLSJSON(key, fallback = []) {
+  try {
+    if (typeof window === 'undefined') return fallback
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+export function setLSJSON(key, value) {
+  try {
+    if (typeof window === 'undefined') return
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // Storage full or disabled — silently fail
+  }
+}
+
+export function removeLS(key) {
+  try {
+    if (typeof window === 'undefined') return
+    localStorage.removeItem(key)
+  } catch {
+    // Silently fail
+  }
+}
+
+
+# ------------------------------------------------
+# src/app/layout.js
+# ------------------------------------------------
+import "./globals.css";
+import { Poppins } from "next/font/google";
+import NavBar from "@/components/NavBar";
+
+const poppins = Poppins({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700", "800", "900"],
+  display: "swap",
+  variable: "--font-poppins",
+});
+
+export const metadata = {
+  title: "J-Corners | Food & Coffee Delivery",
+  description: "Pesan makanan dan kopi favoritmu dari J-Corners! Fresh baked, premium coffee, dan menu pilihan setiap hari.",
+  keywords: "j-corners, food delivery, coffee, bakery, pesan makanan",
+  icons: {
+    icon: "/favicon.ico",
+  },
+  openGraph: {
+    title: "J-Corners | Food & Coffee Delivery",
+    description: "Fresh bakery & premium coffee, delivered to you.",
+    type: "website",
+  },
+};
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="id" data-scroll-behavior="smooth" suppressHydrationWarning>
+      <body className={`${poppins.variable} bg-[#E8E6E3] flex justify-center`} suppressHydrationWarning>
+        {/* Mobile App Shell */}
+        <div className="w-full max-w-md min-h-screen bg-bg relative shadow-2xl overflow-x-hidden border-x border-border">
+          {children}
+          <NavBar />
+        </div>
+      </body>
+    </html>
+  );
+}
+
+# ------------------------------------------------
+# src/app/globals.css
+# ------------------------------------------------
+@import "tailwindcss";
+
+/* ─── Design Tokens ─── */
+@theme {
+  /* Primary — Maroon */
+  --color-primary: #7A1B1B;
+  --color-primary-dark: #5C1010;
+  --color-primary-light: #FEF2F2;
+  --color-primary-glow: rgba(122, 27, 27, 0.15);
+
+  /* Accent — Warm Gold */
+  --color-accent: #D4A574;
+  --color-accent-light: #FDF6EE;
+
+  /* Surfaces */
+  --color-bg: #FAFAF8;
+  --color-surface: #FFFFFF;
+  --color-surface-alt: #F5F3F0;
+  --color-surface-elevated: #FFFFFF;
+
+  /* Text Hierarchy */
+  --color-text: #1A1A1A;
+  --color-text-secondary: #6B7280;
+  --color-text-tertiary: #9CA3AF;
+
+  /* Borders & Dividers */
+  --color-border: rgba(0, 0, 0, 0.06);
+  --color-border-strong: rgba(0, 0, 0, 0.1);
+
+  /* Semantic */
+  --color-success: #059669;
+  --color-success-light: #ECFDF5;
+  --color-danger: #DC2626;
+  --color-danger-light: #FEF2F2;
+  --color-dark: #3B1515;
+
+  /* Legacy aliases */
+  --color-maroon: #7A1B1B;
+  --color-maroon-dark: #5C1010;
+  --color-maroon-light: #FEF2F2;
+  --color-text-dark: #1A1A1A;
+  --color-text-muted: #6B7280;
+
+  /* Typography */
+  --font-sans: var(--font-poppins), system-ui, sans-serif;
+
+  /* Radius Scale */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-2xl: 32px;
+  --radius-full: 9999px;
+
+  /* Shadows */
+  --shadow-xs: 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.07), 0 1px 3px rgba(0,0,0,0.05);
+  --shadow-lg: 0 8px 30px rgba(0,0,0,0.08), 0 2px 8px rgba(0,0,0,0.04);
+  --shadow-xl: 0 16px 48px rgba(0,0,0,0.1), 0 4px 12px rgba(0,0,0,0.05);
+  --shadow-glow: 0 4px 20px var(--color-primary-glow);
+}
+
+/* ─── Base Reset ─── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+}
+
+html[data-scroll-behavior="smooth"] {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-poppins), system-ui, sans-serif;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.6;
+}
+
+::-webkit-scrollbar { width: 0px; }
+
+/* ─── Animations ─── */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── Animation Utilities ─── */
+.animate-fade-in { animation: fadeIn 0.4s ease-out both; }
+.animate-slide-up { animation: slideUp 0.5s ease-out both; }
+.animate-slide-down { animation: slideDown 0.4s ease-out both; }
+.animate-scale-in { animation: scaleIn 0.35s ease-out both; }
+.animate-shimmer {
+  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+.animate-float { animation: float 3s ease-in-out infinite; }
+
+/* Staggered children */
+.stagger-children > *:nth-child(1) { animation-delay: 0ms; }
+.stagger-children > *:nth-child(2) { animation-delay: 60ms; }
+.stagger-children > *:nth-child(3) { animation-delay: 120ms; }
+.stagger-children > *:nth-child(4) { animation-delay: 180ms; }
+.stagger-children > *:nth-child(5) { animation-delay: 240ms; }
+.stagger-children > *:nth-child(6) { animation-delay: 300ms; }
+.stagger-children > *:nth-child(7) { animation-delay: 360ms; }
+.stagger-children > *:nth-child(8) { animation-delay: 420ms; }
+
+/* ─── Component Utilities ─── */
+.glass {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.glass-dark {
+  background: rgba(59, 21, 21, 0.9);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.gradient-primary {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
+}
+
+.gradient-warm {
+  background: linear-gradient(135deg, var(--color-primary) 0%, #8B2E2E 100%);
+}
+
+.gradient-cta {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-dark) 100%);
+}
+
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ─── Premium Interactive States ─── */
+.btn-press {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.btn-press:active {
+  transform: scale(0.96);
+}
+
+.card-hover {
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+.card-hover:active {
+  transform: scale(0.97);
+  box-shadow: var(--shadow-sm);
+}
+
+/* ─── Focus Styles ─── */
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: var(--color-primary) !important;
+  box-shadow: 0 0 0 3px var(--color-primary-glow);
+}
+
+# ------------------------------------------------
+# src/app/page.js
+# ------------------------------------------------
+'use client'
+
+import { useEffect, useState, useCallback, useRef } from 'react'
+import Link from 'next/link'
+import { useRouter } from 'next/navigation'
+import { supabase } from '@/lib/supabase'
+import {
+  Clock, ShoppingBag, Store, Coffee, Cake, UtensilsCrossed, Sparkles,
+  MapPin, Navigation2, Phone, Star, Heart, Truck, CheckCircle2, RefreshCw,
+} from '@/components/icons'
+import { GridSkeleton } from '@/components/LoadingSkeleton'
+import { getLSJSON, getLS } from '@/lib/storage'
+
+/* ─── Hero Carousel ─── */
+const BANNERS = ['/banner-1.png', '/banner-2.png', '/banner-3.png']
+
+function HeroCarousel() {
+  const [current, setCurrent] = useState(0)
+  const timerRef = useRef(null)
+  const touchStart = useRef(0)
+
+  const next = useCallback(() => setCurrent((c) => (c + 1) % BANNERS.length), [])
+
+  useEffect(() => {
+    timerRef.current = setInterval(next, 4000)
+    return () => clearInterval(timerRef.current)
+  }, [next])
+
+  const handleTouchStart = (e) => { touchStart.current = e.touches[0].clientX }
+  const handleTouchEnd = (e) => {
+    const diff = touchStart.current - e.changedTouches[0].clientX
+    if (Math.abs(diff) > 50) {
+      clearInterval(timerRef.current)
+      setCurrent((c) => diff > 0 ? (c + 1) % BANNERS.length : (c - 1 + BANNERS.length) % BANNERS.length)
+      timerRef.current = setInterval(next, 4000)
+    }
+  }
+
+  return (
+    <div className="px-5 mt-4 animate-slide-up">
+      <div
+        className="relative rounded-2xl overflow-hidden shadow-md"
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+      >
+        <div
+          className="flex transition-transform duration-500 ease-out"
+          style={{ transform: `translateX(-${current * 100}%)` }}
+        >
+          {BANNERS.map((src, i) => (
+            <img
+              key={i}
+              src={src}
+              alt={`Promo ${i + 1}`}
+              className="w-full h-40 object-cover shrink-0"
+              draggable={false}
+            />
+          ))}
+        </div>
+        {/* Dots */}
+        <div className="absolute bottom-2.5 left-1/2 -translate-x-1/2 flex gap-1.5">
+          {BANNERS.map((_, i) => (
+            <button
+              key={i}
+              onClick={() => { setCurrent(i); clearInterval(timerRef.current); timerRef.current = setInterval(next, 4000) }}
+              className={`rounded-full transition-all duration-300 ${
+                i === current ? 'w-6 h-2 bg-white shadow-md' : 'w-2 h-2 bg-white/50'
+              }`}
+              aria-label={`Slide ${i + 1}`}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ─── Static Data ─── */
+const CATEGORIES = [
+  { name: 'Food', icon: Store },
+  { name: 'Coffee', icon: Coffee },
+  { name: 'Bakery', icon: Cake },
+  { name: 'Non Coffee', icon: UtensilsCrossed },
+]
+
+const FEATURES = [
+  {
+    icon: Truck,
+    title: 'Gratis Ongkir',
+    desc: 'Min. belanja Rp 40rb, area kampus',
+  },
+  {
+    icon: Clock,
+    title: 'Cepat & Tepat',
+    desc: 'Pesanan diproses hari ini juga',
+  },
+  {
+    icon: CheckCircle2,
+    title: 'Fresh Daily',
+    desc: 'Bahan segar setiap hari',
+  },
+  {
+    icon: Heart,
+    title: 'Homemade',
+    desc: 'Dibuat dengan cinta & resep terbaik',
+  },
+]
+
+const FALLBACK_REVIEWS = [
+  { comment: 'Kopi nya enak banget, pengiriman cepat!', rating: 5 },
+  { comment: 'Bakery favorit sekeluarga. Roti nya fresh!', rating: 5 },
+  { comment: 'Harga terjangkau, rasa ga murahan 👍', rating: 4 },
+]
+
+/* ─── Store Info (from admin settings via localStorage) ─── */
+const STORE_DEFAULTS = {
+  address: 'Jl. Telekomunikasi No. 1, Sukapura, Dayeuhkolot, Bandung, Jawa Barat 40257',
+  phone: '628123456789',
+  lat: -6.9733,
+  lng: 107.6307,
+}
+
+const OPERATING_HOURS = [
+  { day: 'Senin - Jumat', time: '08.00 - 17.00' },
+  { day: 'Sabtu', time: '08.00 - 15.00' },
+  { day: 'Minggu', time: 'Tutup' },
+]
+
+/* ─── Component ─── */
+export default function HomePage() {
+  const router = useRouter()
+  const [showAlert, setShowAlert] = useState(false)
+  const [cartCount, setCartCount] = useState(0)
+  const [popular, setPopular] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [storeAddress, setStoreAddress] = useState(STORE_DEFAULTS.address)
+  const [storePhone, setStorePhone] = useState(STORE_DEFAULTS.phone)
+  const [reviews, setReviews] = useState([])
+
+  useEffect(() => {
+    /* One-time alert */
+    try {
+      if (!sessionStorage.getItem('jcAlert')) {
+        setTimeout(() => {
+          setShowAlert(true)
+          sessionStorage.setItem('jcAlert', '1')
+        }, 900)
+      }
+    } catch { /* incognito */ }
+
+    /* Cart count */
+    const cart = getLSJSON('cart', [])
+    setCartCount(cart.reduce((sum, item) => sum + (item.quantity || 1), 0))
+
+    /* Store settings from admin */
+    setStoreAddress(getLS('store_address', STORE_DEFAULTS.address))
+    setStorePhone(getLS('store_phone', STORE_DEFAULTS.phone))
+
+    /* Popular products + reviews */
+    const fetchData = async () => {
+      const [{ data: prodData }, { data: revData }] = await Promise.all([
+        supabase.from('products').select('*').limit(4),
+        supabase.from('reviews').select('*').gte('rating', 4).order('created_at', { ascending: false }).limit(10),
+      ])
+      setPopular(prodData || [])
+      setReviews(revData && revData.length > 0 ? revData : FALLBACK_REVIEWS)
+      setLoading(false)
+    }
+    fetchData()
+  }, [])
+
+  const refreshPage = () => {
+    setLoading(true)
+    const cart = getLSJSON('cart', [])
+    setCartCount(cart.reduce((sum, item) => sum + (item.quantity || 1), 0))
+    const fetchData = async () => {
+      const [{ data: prodData }, { data: revData }] = await Promise.all([
+        supabase.from('products').select('*').limit(4),
+        supabase.from('reviews').select('*').gte('rating', 4).order('created_at', { ascending: false }).limit(10),
+      ])
+      setPopular(prodData || [])
+      setReviews(revData && revData.length > 0 ? revData : FALLBACK_REVIEWS)
+      setLoading(false)
+    }
+    fetchData()
+  }
+
+  const waLink = `https://wa.me/${storePhone}`
+  const mapsSearchUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(storeAddress)}`
+
+  return (
+    <>
+      {/* ─── Order Deadline Alert Modal ─── */}
+      {showAlert && (
+        <div
+          className="fixed inset-0 bg-black/40 z-[9999] flex items-center justify-center p-5 backdrop-blur-sm animate-fade-in"
+          onClick={() => setShowAlert(false)}
+        >
+          <div
+            className="bg-surface w-full rounded-3xl p-8 text-center shadow-2xl animate-scale-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-16 h-16 bg-primary rounded-2xl flex items-center justify-center mx-auto mb-5 shadow-lg">
+              <Clock size={28} className="text-white" />
+            </div>
+            <h2 className="text-lg font-bold text-text mb-2">Batas Waktu Pemesanan</h2>
+            <p className="text-sm text-text-secondary mb-6 leading-relaxed">
+              Pemesanan ditutup setiap hari{' '}
+              <strong className="text-text">pukul 14.00 WIB</strong>.
+              Pesan lebih awal agar diproses hari ini!
+            </p>
+            <button
+              onClick={() => setShowAlert(false)}
+              className="w-full bg-primary text-white py-4 rounded-2xl font-bold btn-press shadow-lg"
+            >
+              Oke, Mengerti!
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Header ─── */}
+      <header className="sticky top-0 z-50 glass px-6 py-4 flex justify-between items-center border-b border-border animate-slide-down">
+        <Link href="/" className="btn-press" aria-label="Beranda J-Corners">
+          <p className="text-[11px] text-text-secondary font-medium">Selamat datang di,</p>
+          <h1 className="text-xl font-extrabold text-text tracking-tight">J-Corners</h1>
+        </Link>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={refreshPage}
+            className="w-11 h-11 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
+            aria-label="Refresh"
+          >
+            <RefreshCw size={17} className="text-primary" />
+          </button>
+          <Link
+            href="/cart"
+            className="relative w-11 h-11 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
+            aria-label="Keranjang"
+          >
+            <ShoppingBag size={19} className="text-text" />
+            {cartCount > 0 && (
+              <span className="absolute -top-1 -right-1 bg-primary text-white text-[9px] font-bold w-[18px] h-[18px] rounded-full flex items-center justify-center shadow-md animate-scale-in">
+                {cartCount}
+              </span>
+            )}
+          </Link>
+        </div>
+      </header>
+
+      {/* ─── Hero Carousel ─── */}
+      <HeroCarousel />
+
+      {/* ─── Info Banner ─── */}
+      <div className="px-5 mt-4 mb-6 animate-slide-up">
+        <div
+          onClick={() => setShowAlert(true)}
+          className="bg-primary text-white rounded-2xl p-4 flex items-center gap-4 shadow-lg cursor-pointer btn-press overflow-hidden relative"
+        >
+          <div className="absolute -right-8 -top-8 w-28 h-28 bg-white/10 rounded-full blur-2xl" />
+          <div className="absolute -left-4 -bottom-4 w-16 h-16 bg-white/5 rounded-full blur-xl" />
+
+          <div className="bg-white/20 p-3 rounded-xl backdrop-blur-sm shrink-0">
+            <Clock size={22} className="text-white" />
+          </div>
+          <div>
+            <h3 className="font-bold text-sm">Order Sebelum 14.00!</h3>
+            <p className="text-[11px] text-white/70 mt-0.5">Tap untuk info pengiriman</p>
+          </div>
+        </div>
+      </div>
+
+      {/* ─── Categories ─── */}
+      <div className="px-5 mb-8 animate-slide-up" style={{ animationDelay: '100ms' }}>
+        <div className="flex justify-between items-end mb-4">
+          <h2 className="text-[15px] font-bold text-text">Kategori</h2>
+          <Link href="/menu" className="text-xs font-bold text-primary">
+            Lihat Semua
+          </Link>
+        </div>
+        <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide stagger-children">
+          {CATEGORIES.map((cat) => {
+            const Icon = cat.icon
+            return (
+              <button
+                key={cat.name}
+                onClick={() => router.push(`/menu?cat=${cat.name}`)}
+                className="flex flex-col items-center gap-2 min-w-[72px] animate-slide-up"
+              >
+                <div className="w-16 h-16 bg-surface rounded-2xl flex items-center justify-center shadow-sm border border-border text-primary card-hover">
+                  <Icon size={26} strokeWidth={1.5} />
+                </div>
+                <span className="text-[11px] font-semibold text-text">{cat.name}</span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* ─── Popular Items ─── */}
+      <div className="px-5 mb-10 animate-slide-up" style={{ animationDelay: '200ms' }}>
+        <div className="flex items-center gap-2 mb-4">
+          <Sparkles size={16} className="text-accent" />
+          <h2 className="text-[15px] font-bold text-text">Paling Diminati</h2>
+        </div>
+
+        {loading ? (
+          <GridSkeleton count={4} />
+        ) : (
+          <div className="grid grid-cols-2 gap-4 stagger-children">
+            {popular.map((item) => (
+              <Link
+                key={item.id}
+                href={`/menu/${item.id}`}
+                className="bg-surface rounded-3xl p-3 shadow-sm border border-border flex flex-col card-hover animate-slide-up"
+              >
+                <div className="w-full h-28 rounded-2xl bg-surface-alt overflow-hidden mb-3">
+                  <img
+                    src={item.image_url || 'https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?w=400&q=75'}
+                    className="w-full h-full object-cover transition-transform duration-500 hover:scale-105"
+                    alt={item.name}
+                  />
+                </div>
+                <h3 className="text-xs font-bold text-text line-clamp-1">{item.name}</h3>
+                <p className="text-primary font-extrabold text-sm mt-auto pt-2">
+                  Rp {item.price?.toLocaleString('id-ID')}
+                </p>
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ─── Outlet Location — Interactive Map ─── */}
+      <div className="px-5 mb-8 animate-slide-up" style={{ animationDelay: '300ms' }}>
+        <div className="flex items-center gap-2 mb-4">
+          <MapPin size={16} className="text-primary" />
+          <h2 className="text-[15px] font-bold text-text">Lokasi Outlet</h2>
+        </div>
+
+        <div className="bg-surface rounded-3xl overflow-hidden shadow-sm border border-border">
+          {/* Embedded Map — draggable/interactive */}
+          <div className="w-full h-48 bg-surface-alt relative overflow-hidden">
+            <iframe
+              title="Lokasi J-Corners"
+              src={`https://maps.google.com/maps?q=${encodeURIComponent(storeAddress)}&t=&z=15&ie=UTF8&iwloc=&output=embed`}
+              className="w-full h-full border-0"
+              loading="lazy"
+              referrerPolicy="no-referrer-when-downgrade"
+              allowFullScreen
+            />
+          </div>
+
+          {/* Address & Actions */}
+          <div className="p-4">
+            <p className="text-xs text-text-secondary leading-relaxed mb-3">
+              {storeAddress}
+            </p>
+            <div className="flex gap-2">
+              <a
+                href={mapsSearchUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="flex-1 bg-primary text-white py-2.5 rounded-xl text-[11px] font-bold btn-press flex items-center justify-center gap-1.5 shadow-sm"
+              >
+                <Navigation2 size={13} />
+                Navigasi
+              </a>
+              <a
+                href={waLink}
+                target="_blank"
+                rel="noreferrer"
+                className="flex-1 bg-success text-white py-2.5 rounded-xl text-[11px] font-bold btn-press flex items-center justify-center gap-1.5 shadow-sm"
+              >
+                <Phone size={13} />
+                WhatsApp
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ─── Operating Hours ─── */}
+      <div className="px-5 mb-8 animate-slide-up" style={{ animationDelay: '350ms' }}>
+        <div className="flex items-center gap-2 mb-4">
+          <Clock size={16} className="text-accent" />
+          <h2 className="text-[15px] font-bold text-text">Jam Operasional</h2>
+        </div>
+
+        <div className="bg-surface rounded-3xl p-4 shadow-sm border border-border">
+          <div className="space-y-2.5">
+            {OPERATING_HOURS.map((item) => (
+              <div
+                key={item.day}
+                className="flex justify-between items-center"
+              >
+                <span className="text-xs font-semibold text-text">{item.day}</span>
+                <span className={`text-xs font-bold px-3 py-1 rounded-lg ${
+                  item.time === 'Tutup'
+                    ? 'bg-danger-light text-danger'
+                    : 'bg-primary-light text-primary'
+                }`}>
+                  {item.time}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ─── Why Choose Us ─── */}
+      <div className="px-5 mb-8 animate-slide-up" style={{ animationDelay: '400ms' }}>
+        <div className="flex items-center gap-2 mb-4">
+          <Heart size={16} className="text-primary" />
+          <h2 className="text-[15px] font-bold text-text">Kenapa J-Corners?</h2>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          {FEATURES.map((f) => {
+            const Icon = f.icon
+            return (
+              <div
+                key={f.title}
+                className="bg-surface rounded-2xl p-4 shadow-sm border border-border text-center card-hover"
+              >
+                <div className="w-11 h-11 bg-primary-light rounded-xl flex items-center justify-center mx-auto mb-3">
+                  <Icon size={20} className="text-primary" />
+                </div>
+                <h3 className="text-[11px] font-bold text-text mb-1">{f.title}</h3>
+                <p className="text-[10px] text-text-secondary leading-relaxed">{f.desc}</p>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* ─── Customer Reviews (dynamic from DB, rating ≥ 4) ─── */}
+      <div className="px-5 mb-8 animate-slide-up" style={{ animationDelay: '450ms' }}>
+        <div className="flex items-center gap-2 mb-4">
+          <Star size={16} className="text-accent" />
+          <h2 className="text-[15px] font-bold text-text">Kata Mereka</h2>
+        </div>
+
+        <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide snap-x snap-mandatory">
+          {reviews.map((r, i) => (
+            <div
+              key={i}
+              className="bg-surface rounded-2xl p-4 shadow-sm border border-border min-w-[240px] snap-start shrink-0"
+            >
+              <div className="flex gap-0.5 mb-2">
+                {Array.from({ length: 5 }).map((_, j) => (
+                  <Star
+                    key={j}
+                    size={12}
+                    className={j < r.rating ? 'text-accent fill-accent' : 'text-border'}
+                  />
+                ))}
+              </div>
+              <p className="text-[11px] text-text-secondary leading-relaxed mb-3 italic">
+                &ldquo;{r.comment || r.text || 'Review pelanggan'}&rdquo;
+              </p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ─── Footer ─── */}
+      <div className="pb-32 animate-slide-up" style={{ animationDelay: '500ms' }}>
+        <div className="mx-5 bg-primary rounded-3xl p-6 text-center overflow-hidden relative">
+          <div className="absolute -right-10 -top-10 w-32 h-32 bg-white/5 rounded-full blur-2xl" />
+          <div className="absolute -left-6 -bottom-6 w-20 h-20 bg-white/5 rounded-full blur-xl" />
+
+          <div className="relative z-10">
+            <h3 className="text-white font-extrabold text-lg mb-1">J-Corners</h3>
+            <p className="text-white/60 text-[11px] mb-4">Fresh Bakery & Premium Coffee</p>
+
+            <div className="flex justify-center gap-3 mb-4">
+              <a
+                href={waLink}
+                target="_blank"
+                rel="noreferrer"
+                className="w-9 h-9 bg-white/15 rounded-full flex items-center justify-center btn-press backdrop-blur-sm"
+              >
+                <Phone size={15} className="text-white" />
+              </a>
+              <a
+                href={mapsSearchUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="w-9 h-9 bg-white/15 rounded-full flex items-center justify-center btn-press backdrop-blur-sm"
+              >
+                <MapPin size={15} className="text-white" />
+              </a>
+            </div>
+
+            <p className="text-white/40 text-[9px]">
+              © 2026 J-Corners. All rights reserved.
+            </p>
+          </div>
+        </div>
+      </div>
+    </>
+  )
+}
+
+# ------------------------------------------------
+# src/app/menu/page.js
+# ------------------------------------------------
+'use client'
+
+import { useEffect, useState, Suspense } from 'react'
+import { useSearchParams, useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { supabase } from '@/lib/supabase'
+import PageHeader from '@/components/PageHeader'
+import EmptyState from '@/components/EmptyState'
+import { GridSkeleton } from '@/components/LoadingSkeleton'
+import { AlertTriangle, RefreshCw } from '@/components/icons'
+import { getLSJSON } from '@/lib/storage'
+
+const CATEGORIES = ['Food', 'Bakery', 'Coffee', 'Non Coffee']
+
+function MenuContent() {
+  const searchParams = useSearchParams()
+  const router = useRouter()
+  const [activeCat, setActiveCat] = useState(searchParams.get('cat') || 'Food')
+  const [products, setProducts] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [cartCount, setCartCount] = useState(0)
+
+  useEffect(() => {
+    const cart = getLSJSON('cart', [])
+    setCartCount(cart.reduce((sum, item) => sum + (item.quantity || 1), 0))
+
+    const fetchProducts = async () => {
+      const { data } = await supabase.from('products').select('*')
+      setProducts(data || [])
+      setLoading(false)
+    }
+    fetchProducts()
+  }, [])
+
+  const refreshMenu = () => {
+    setLoading(true)
+    const cart = getLSJSON('cart', [])
+    setCartCount(cart.reduce((sum, item) => sum + (item.quantity || 1), 0))
+    const fetchProducts = async () => {
+      const { data } = await supabase.from('products').select('*')
+      setProducts(data || [])
+      setLoading(false)
+    }
+    fetchProducts()
+  }
+
+  const filtered = products.filter((p) => p.category === activeCat)
+
+  return (
+    <>
+      <PageHeader
+        title="Katalog Menu"
+        showCart
+        cartCount={cartCount}
+        onBack={() => router.push('/')}
+        rightAction={
+          <div className="flex items-center gap-2">
+            <button onClick={refreshMenu} className="w-10 h-10 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press" aria-label="Refresh">
+              <RefreshCw size={16} className="text-primary" />
+            </button>
+          </div>
+        }
+      />
+
+      {/* ─── Category Filter ─── */}
+      <div className="px-5 py-4 sticky top-[73px] z-40 glass border-b border-border">
+        <div className="flex gap-2 overflow-x-auto scrollbar-hide pb-1">
+          {CATEGORIES.map((cat) => (
+            <button
+              key={cat}
+              onClick={() => setActiveCat(cat)}
+              className={`px-5 py-2.5 rounded-full text-xs font-bold whitespace-nowrap transition-all duration-200 btn-press ${
+                activeCat === cat
+                  ? 'bg-primary text-white shadow-md'
+                  : 'bg-surface text-text-secondary border border-border'
+              }`}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ─── Product Grid ─── */}
+      <div className="px-5 pb-32 pt-4">
+        {loading ? (
+          <GridSkeleton count={4} />
+        ) : filtered.length === 0 ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Belum ada menu"
+            description="Belum ada menu di kategori ini"
+          />
+        ) : (
+          <div className="grid grid-cols-2 gap-4 stagger-children">
+            {filtered.map((item) => (
+              <Link
+                key={item.id}
+                href={`/menu/${item.id}`}
+                className="bg-surface rounded-3xl p-3 shadow-sm border border-border flex flex-col card-hover animate-slide-up relative"
+              >
+                {/* Sold Out Badge */}
+                {item.available === false && (
+                  <div className="absolute top-4 left-4 bg-danger text-white text-[9px] font-bold px-2.5 py-1 rounded-lg z-10 shadow-sm">
+                    HABIS
+                  </div>
+                )}
+
+                {/* Image */}
+                <div className={`w-full h-32 rounded-2xl bg-surface-alt overflow-hidden mb-3 ${
+                  item.available === false ? 'grayscale opacity-50' : ''
+                }`}>
+                  <img
+                    src={item.image_url || 'https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?w=400&q=75'}
+                    className="w-full h-full object-cover transition-transform duration-500 hover:scale-105"
+                    alt={item.name}
+                  />
+                </div>
+
+                {/* Info */}
+                <h3 className="text-xs font-bold line-clamp-1 text-text">{item.name}</h3>
+                <p className="text-[10px] text-text-secondary line-clamp-2 mt-1 flex-1 leading-relaxed">
+                  {item.description}
+                </p>
+                <p className="text-primary font-extrabold text-sm mt-3">
+                  Rp {item.price?.toLocaleString('id-ID')}
+                </p>
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  )
+}
+
+export default function MenuPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-bg flex items-center justify-center">
+          <div className="w-10 h-10 border-[3px] border-surface-alt border-t-primary rounded-full animate-spin" />
+        </div>
+      }
+    >
+      <MenuContent />
+    </Suspense>
+  )
+}
+
+# ------------------------------------------------
+# src/app/menu/[id]/page.js
+# ------------------------------------------------
+'use client'
+
+import { useEffect, useState } from 'react'
+import { useParams, useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { supabase } from '@/lib/supabase'
+import { getLSJSON, setLSJSON } from '@/lib/storage'
+import { PageLoader } from '@/components/LoadingSkeleton'
+import { ChevronLeft, ShoppingBag, Minus, Plus, MessageSquare, CheckCircle2 } from '@/components/icons'
+
+export default function FoodDetailPage() {
+  const { id } = useParams()
+  const router = useRouter()
+  const [product, setProduct] = useState(null)
+  const [qty, setQty] = useState(1)
+  const [notes, setNotes] = useState('')
+  const [cartCount, setCartCount] = useState(0)
+  const [added, setAdded] = useState(false)
+
+  useEffect(() => {
+    const fetchProduct = async () => {
+      const { data } = await supabase.from('products').select('*').eq('id', id).single()
+      setProduct(data)
+    }
+    fetchProduct()
+
+    const cart = getLSJSON('cart', [])
+    setCartCount(cart.reduce((sum, item) => sum + (item.quantity || 1), 0))
+  }, [id])
+
+  const total = product ? product.price * qty : 0
+  const isSoldOut = product?.available === false
+
+  const addToCart = () => {
+    if (isSoldOut) return
+
+    const cart = getLSJSON('cart', [])
+    const idx = cart.findIndex((i) => i.id === product.id)
+
+    if (idx !== -1) {
+      cart[idx].quantity += qty
+      cart[idx].notes = notes
+    } else {
+      cart.push({
+        id: product.id,
+        name: product.name,
+        price: product.price,
+        image_url: product.image_url,
+        quantity: qty,
+        notes,
+      })
+    }
+
+    setLSJSON('cart', cart)
+    setCartCount(cart.reduce((sum, item) => sum + (item.quantity || 1), 0))
+
+    /* Show toast, stay on page so user isn't confused */
+    setAdded(true)
+    setQty(1)
+    setNotes('')
+    setTimeout(() => setAdded(false), 2000)
+  }
+
+  if (!product) return <PageLoader />
+
+  return (
+    <div className="min-h-screen bg-bg pb-32">
+      {/* ─── Added Toast ─── */}
+      {added && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[9999] bg-success text-white text-sm font-bold px-6 py-3 rounded-2xl shadow-xl animate-slide-down flex items-center gap-2">
+          <CheckCircle2 size={16} />
+          Ditambahkan ke keranjang!
+        </div>
+      )}
+
+      {/* ─── Floating Header ─── */}
+      <div className="absolute top-0 w-full max-w-md z-50 flex justify-between items-center p-5">
+        <button
+          onClick={() => router.back()}
+          className="glass w-10 h-10 rounded-full flex items-center justify-center shadow-lg btn-press"
+          aria-label="Kembali"
+        >
+          <ChevronLeft size={18} className="text-text" />
+        </button>
+        <Link
+          href="/cart"
+          className="relative glass w-10 h-10 rounded-full flex items-center justify-center shadow-lg btn-press"
+          aria-label="Keranjang"
+        >
+          <ShoppingBag size={18} className="text-text" />
+          {cartCount > 0 && (
+            <span className="absolute -top-1 -right-1 bg-primary text-white text-[9px] font-bold w-[18px] h-[18px] rounded-full flex items-center justify-center shadow-md">
+              {cartCount}
+            </span>
+          )}
+        </Link>
+      </div>
+
+      {/* ─── Product Image ─── */}
+      <div className="w-full h-80 bg-surface-alt relative overflow-hidden">
+        <img
+          src={product.image_url || 'https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?w=700&q=80'}
+          className="w-full h-full object-cover animate-fade-in"
+          alt={product.name}
+        />
+        {/* Gradient overlay */}
+        <div className="absolute inset-0 bg-gradient-to-t from-bg/30 to-transparent" />
+        {/* Curved bottom */}
+        <div className="absolute bottom-0 w-full h-8 bg-bg rounded-t-[2rem] translate-y-1" />
+      </div>
+
+      {/* ─── Content ─── */}
+      <div className="px-6 -mt-2 relative z-10 animate-slide-up">
+        {/* Category label */}
+        {product.category && (
+          <span className="inline-block text-[10px] font-bold text-primary bg-primary-light px-3 py-1 rounded-full mb-3 uppercase tracking-wider">
+            {product.category}
+          </span>
+        )}
+
+        {/* Title & Price */}
+        <div className="flex justify-between items-start mb-3">
+          <h1 className="text-2xl font-extrabold text-text leading-tight w-3/4">
+            {product.name}
+          </h1>
+          <span className="text-xl font-extrabold text-primary whitespace-nowrap">
+            Rp {product.price?.toLocaleString('id-ID')}
+          </span>
+        </div>
+
+        <p className="text-xs text-text-secondary leading-relaxed mb-6">
+          {product.description || 'Menu spesial dari J-Corners'}
+        </p>
+
+        {/* ─── Quantity ─── */}
+        <div className="flex items-center justify-between bg-surface p-4 rounded-2xl shadow-sm border border-border mb-4">
+          <span className="text-sm font-bold text-text">Jumlah Pesanan</span>
+          <div className="flex items-center gap-3 bg-surface-alt rounded-xl p-1">
+            <button
+              onClick={() => setQty((q) => Math.max(1, q - 1))}
+              className="w-8 h-8 rounded-lg bg-surface shadow-xs flex items-center justify-center btn-press"
+              aria-label="Kurangi"
+            >
+              <Minus size={14} strokeWidth={2.5} className="text-text" />
+            </button>
+            <span className="font-bold w-5 text-center text-text">{qty}</span>
+            <button
+              onClick={() => setQty((q) => q + 1)}
+              className="w-8 h-8 rounded-lg bg-primary text-white shadow-sm flex items-center justify-center btn-press"
+              aria-label="Tambah"
+            >
+              <Plus size={14} strokeWidth={2.5} />
+            </button>
+          </div>
+        </div>
+
+        {/* ─── Notes ─── */}
+        <div className="bg-surface p-4 rounded-2xl shadow-sm border border-border">
+          <label className="flex items-center gap-2 text-xs font-bold text-text mb-2">
+            <MessageSquare size={14} className="text-text-secondary" />
+            Catatan (Opsional)
+          </label>
+          <input
+            type="text"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="Contoh: Es dipisah, pedas..."
+            className="w-full text-sm bg-surface-alt p-3 rounded-xl border border-border"
+          />
+        </div>
+      </div>
+
+      {/* ─── Fixed CTA ─── */}
+      <div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md px-5 pb-5 pt-3 bg-gradient-to-t from-bg via-bg to-transparent z-50">
+        <button
+          onClick={addToCart}
+          disabled={isSoldOut || added}
+          className={`w-full py-3.5 rounded-full font-bold text-white text-sm shadow-lg flex justify-between px-6 items-center btn-press transition-colors duration-200 ${
+            isSoldOut ? 'bg-gray-400 cursor-not-allowed' : added ? 'bg-success' : 'bg-primary'
+          }`}
+        >
+          <span>{isSoldOut ? 'Stok Habis' : added ? '✓ Ditambahkan!' : 'Tambah ke Keranjang'}</span>
+          {!isSoldOut && !added && <span className="font-extrabold">Rp {total.toLocaleString('id-ID')}</span>}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+# ------------------------------------------------
+# src/app/cart/page.js
+# ------------------------------------------------
+'use client'
+
+import { useState, useEffect } from 'react'
+import Link from 'next/link'
+import { useRouter } from 'next/navigation'
+import { supabase } from '@/lib/supabase'
+import { getLS, getLSJSON, setLSJSON, removeLS } from '@/lib/storage'
+import PageHeader from '@/components/PageHeader'
+import EmptyState from '@/components/EmptyState'
+import FormField from '@/components/FormField'
+import {
+  ShoppingBag, User, Truck, Plus, Minus, X,
+  CreditCard, ScanLine, Loader2, CheckCircle2,
+  MapPin, Upload, Tag,
+} from '@/components/icons'
+
+/* Alamat toko default — admin bisa update di dashboard */
+const DEFAULT_STORE_ADDRESS = 'Jl. Telekomunikasi No. 1, Sukapura, Dayeuhkolot, Bandung, Jawa Barat 40257'
+const DEFAULT_WA = '628123456789'
+
+/* Ongkir logic: gratis ≥ 40rb, Rp 5rb untuk 25-39rb, Rp 10rb < 25rb */
+const getOngkir = (subtotal, type) => {
+  if (type === 'pickup') return 0
+  if (subtotal >= 40000) return 0
+  if (subtotal >= 25000) return 5000
+  return 10000
+}
+
+/* Admin fee for transfer/QRIS */
+const ADMIN_FEE = 1500
+
+export default function CartPage() {
+  const router = useRouter()
+  const [cart, setCart] = useState([])
+  const [type, setType] = useState('delivery')
+  const [nama, setNama] = useState('')
+  const [noHp, setNoHp] = useState('')
+  const [alamat, setAlamat] = useState('')
+  const [payment, setPayment] = useState('cash')
+  const [file, setFile] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [toast, setToast] = useState('')
+  const [orderSuccess, setOrderSuccess] = useState(false)
+  const [storeAddress, setStoreAddress] = useState(DEFAULT_STORE_ADDRESS)
+  const [storeWa, setStoreWa] = useState(DEFAULT_WA)
+  const [qrisUrl, setQrisUrl] = useState('')
+  const [bankAccount, setBankAccount] = useState('')
+  const [bankName, setBankName] = useState('')
+
+  /* Promo */
+  const [promoCode, setPromoCode] = useState('')
+  const [promoApplied, setPromoApplied] = useState(null)
+  const [promoLoading, setPromoLoading] = useState(false)
+  const [promoError, setPromoError] = useState('')
+
+  useEffect(() => {
+    setCart(getLSJSON('cart', []))
+
+    /* Load store settings from localStorage (set by admin) */
+    const savedAddr = getLS('store_address')
+    if (savedAddr) setStoreAddress(savedAddr)
+    const savedWa = getLS('store_phone')
+    if (savedWa) setStoreWa(savedWa)
+    setQrisUrl(getLS('store_qris_url', ''))
+    setBankAccount(getLS('store_bank_account', ''))
+    setBankName(getLS('store_bank_name', ''))
+  }, [])
+
+  /* ─── Cart Helpers ─── */
+  const saveCart = (updated) => {
+    setCart(updated)
+    setLSJSON('cart', updated)
+  }
+
+  const increment = (id) =>
+    saveCart(cart.map((i) => (i.id === id ? { ...i, quantity: i.quantity + 1 } : i)))
+
+  const decrement = (id) =>
+    saveCart(cart.map((i) => (i.id === id ? { ...i, quantity: Math.max(1, i.quantity - 1) } : i)))
+
+  const removeItem = (id) =>
+    saveCart(cart.filter((i) => i.id !== id))
+
+  const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0)
+  const ongkir = getOngkir(subtotal, type)
+  const adminFee = payment === 'qris' ? ADMIN_FEE : 0
+
+  /* Promo discount calculation */
+  let discount = 0
+  if (promoApplied) {
+    if (promoApplied.discount_percent > 0) {
+      discount = Math.floor(subtotal * promoApplied.discount_percent / 100)
+    }
+    if (promoApplied.discount_amount > 0) {
+      discount += promoApplied.discount_amount
+    }
+  }
+  const total = Math.max(0, subtotal + ongkir + adminFee - discount)
+
+  /* ─── Apply Promo ─── */
+  const applyPromo = async () => {
+    if (!promoCode.trim()) return
+    setPromoLoading(true)
+    setPromoError('')
+
+    const { data, error } = await supabase
+      .from('promo_codes')
+      .select('*')
+      .eq('code', promoCode.toUpperCase())
+      .eq('is_active', true)
+      .single()
+
+    if (error || !data) {
+      setPromoError('Kode promo tidak ditemukan atau tidak aktif')
+      setPromoApplied(null)
+    } else if (data.min_order > 0 && subtotal < data.min_order) {
+      setPromoError(`Min. order ${data.min_order.toLocaleString('id-ID')} untuk promo ini`)
+      setPromoApplied(null)
+    } else if (data.max_usage > 0 && data.usage_count >= data.max_usage) {
+      setPromoError('Kuota promo sudah habis')
+      setPromoApplied(null)
+    } else if (data.valid_until && new Date(data.valid_until) < new Date()) {
+      setPromoError('Promo sudah expired')
+      setPromoApplied(null)
+    } else {
+      setPromoApplied(data)
+      setPromoError('')
+    }
+    setPromoLoading(false)
+  }
+
+  const removePromo = () => {
+    setPromoApplied(null)
+    setPromoCode('')
+    setPromoError('')
+  }
+
+  /* ─── Show Toast ─── */
+  const showToast = (message) => {
+    setToast(message)
+    setTimeout(() => setToast(''), 3000)
+  }
+
+  /* ─── Order Submission ─── */
+  const handleOrder = async () => {
+    if (!nama.trim()) return showToast('⚠️ Masukkan nama kamu!')
+    if (!noHp.trim()) return showToast('⚠️ Masukkan nomor HP!')
+    if (type === 'delivery' && !alamat.trim()) return showToast('⚠️ Masukkan alamat pengiriman!')
+    if (payment === 'qris' && !file) return showToast('⚠️ Upload bukti transfer!')
+
+    setLoading(true)
+    let buktiUrl = null
+
+    try {
+      /* Upload bukti transfer */
+      if (payment === 'qris' && file) {
+        const ext = file.name.split('.').pop()
+        const fname = `bukti_${Date.now()}.${ext}`
+        const { error } = await supabase.storage.from('bukti-transfer').upload(fname, file)
+        if (!error) {
+          buktiUrl = supabase.storage.from('bukti-transfer').getPublicUrl(fname).data.publicUrl
+        }
+      }
+
+      /* Insert order */
+      const { data: orderData, error: orderError } = await supabase
+        .from('orders')
+        .insert([{
+          nama_pelanggan: nama,
+          nama: nama,
+          no_hp: noHp,
+          alamat: type === 'delivery' ? alamat : 'Pickup',
+          total_harga: total,
+          metode_bayar: payment,
+          bukti_transfer: buktiUrl,
+          items: cart.map((i) => ({ id: i.id, name: i.name, quantity: i.quantity, price: i.price })),
+          promo_code: promoApplied?.code || null,
+          discount: discount || 0,
+        }])
+        .select()
+
+      if (orderError) {
+        console.error('Order error:', orderError)
+        showToast('❌ Gagal memesan! Coba lagi.')
+        setLoading(false)
+        return
+      }
+
+      /* Increment promo usage */
+      if (promoApplied) {
+        await supabase.from('promo_codes').update({ usage_count: (promoApplied.usage_count || 0) + 1 }).eq('id', promoApplied.id)
+      }
+
+      /* Save order ID locally */
+      const myOrders = getLSJSON('my_orders', [])
+      myOrders.push(orderData[0].id)
+      setLSJSON('my_orders', myOrders)
+
+      /* Build WhatsApp message */
+      const items = cart.map((i) => `• ${i.name} (x${i.quantity})`).join('\n')
+      const ongkirInfo = ongkir === 0 ? 'GRATIS' : `Rp ${ongkir.toLocaleString('id-ID')}`
+      const adminFeeInfo = adminFee > 0 ? `Rp ${adminFee.toLocaleString('id-ID')}` : '-'
+      const msg = encodeURIComponent(
+        `*ORDER BARU - J-CORNERS*\nID: ${orderData[0].id.slice(0, 8).toUpperCase()}\n\nNama: ${nama}\nHP: ${noHp}\nTipe: ${type === 'delivery' ? 'Delivery' : 'Pickup'}\n${
+          type === 'delivery' ? `Alamat: ${alamat}\n` : ''
+        }Metode: ${payment.toUpperCase()}\n\n*Pesanan:*\n${items}\n\nSubtotal: Rp ${subtotal.toLocaleString('id-ID')}\nOngkir: ${ongkirInfo}${adminFee > 0 ? `\nBiaya Admin: ${adminFeeInfo}` : ''}\n*Total: Rp ${total.toLocaleString('id-ID')}*${
+          buktiUrl ? `\nBukti: ${buktiUrl}` : ''
+        }`
+      )
+
+      removeLS('cart')
+      setCart([])
+      setOrderSuccess(true)
+
+      setTimeout(() => {
+        window.open(`https://wa.me/${storeWa}?text=${msg}`, '_blank')
+      }, 1500)
+
+      setTimeout(() => {
+        router.push('/history')
+      }, 2500)
+    } catch (err) {
+      console.error('Unexpected error:', err)
+      showToast('❌ Terjadi kesalahan. Coba lagi.')
+      setLoading(false)
+    }
+  }
+
+  /* ─── Success State ─── */
+  if (orderSuccess) {
+    return (
+      <div className="min-h-screen bg-bg flex flex-col items-center justify-center p-6 text-center animate-fade-in">
+        <div className="w-20 h-20 rounded-full bg-success-light flex items-center justify-center mb-5 animate-scale-in">
+          <CheckCircle2 size={40} className="text-success" />
+        </div>
+        <h2 className="text-xl font-extrabold text-text mb-2">Pesanan Berhasil! 🎉</h2>
+        <p className="text-sm text-text-secondary mb-2 leading-relaxed max-w-[280px]">
+          Pesananmu sedang dikirim ke WhatsApp. Admin akan segera mengkonfirmasi.
+        </p>
+        <p className="text-xs text-text-tertiary mb-6">Mengalihkan ke riwayat pesanan...</p>
+        <div className="w-8 h-8 border-[3px] border-surface-alt border-t-primary rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  /* ─── Empty State ─── */
+  if (cart.length === 0) {
+    return (
+      <div className="min-h-screen bg-bg">
+        <PageHeader title="Keranjang" onBack={() => router.push('/')} />
+        <EmptyState
+          icon={ShoppingBag}
+          title="Keranjang Kosong"
+          description="Belum ada item di keranjangmu"
+          actionLabel="Pesan Sekarang"
+          actionHref="/menu"
+        />
+      </div>
+    )
+  }
+
+  return (
+    <main className="min-h-screen bg-surface-alt pb-32 relative">
+      {/* ─── Toast ─── */}
+      {toast && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[9999] bg-text text-white text-sm font-bold px-6 py-3 rounded-2xl shadow-xl animate-slide-down max-w-[90%] text-center">
+          {toast}
+        </div>
+      )}
+
+      {/* ─── Header ─── */}
+      <PageHeader title="Detail Pesanan" onBack={() => router.back()} />
+
+      {/* ─── Order Type Toggle (simple, like home category) ─── */}
+      <div className="px-5 mt-4 mb-5 animate-slide-up">
+        <label className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest mb-2 block">
+          Tipe Pengambilan
+        </label>
+        <div className="flex gap-2">
+          {[
+            { key: 'pickup', label: 'Pickup', icon: User },
+            { key: 'delivery', label: 'Delivery', icon: Truck },
+          ].map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              onClick={() => setType(key)}
+              className={`flex-1 py-3 text-sm font-bold rounded-2xl transition-all duration-200 flex items-center justify-center gap-2 btn-press border ${
+                type === key
+                  ? 'bg-primary text-white border-primary shadow-md'
+                  : 'bg-surface text-text-secondary border-border'
+              }`}
+            >
+              <Icon size={16} />
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ─── Pickup: Show store address ─── */}
+      {type === 'pickup' && (
+        <div className="px-5 mb-5 animate-scale-in">
+          <div className="bg-primary-light rounded-2xl p-4 flex items-start gap-3 border border-primary/10">
+            <MapPin size={18} className="text-primary mt-0.5 shrink-0" />
+            <div>
+              <p className="text-[10px] font-bold text-primary uppercase tracking-widest mb-1">
+                Alamat Toko (Ambil di Sini)
+              </p>
+              <p className="text-sm text-text font-medium leading-relaxed">{storeAddress}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Form ─── */}
+      <div className="px-5 mb-5 animate-slide-up" style={{ animationDelay: '60ms' }}>
+        <div className="bg-surface rounded-3xl p-5 shadow-sm border border-border space-y-4">
+          <FormField
+            label="Nama Pemesan"
+            value={nama}
+            onChange={(e) => setNama(e.target.value)}
+            placeholder="Masukkan nama lengkap..."
+            required
+          />
+          <FormField
+            label="No. HP / WhatsApp"
+            type="tel"
+            value={noHp}
+            onChange={(e) => setNoHp(e.target.value)}
+            placeholder="08xxxxxxxxxx"
+            required
+          />
+          {type === 'delivery' && (
+            <FormField
+              label="Alamat Pengiriman"
+              type="textarea"
+              value={alamat}
+              onChange={(e) => setAlamat(e.target.value)}
+              placeholder="Alamat lengkap (termasuk RT/RW, kelurahan, kota)..."
+              rows={3}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* ─── Cart Items ─── */}
+      <div className="px-5 space-y-3 mb-6 stagger-children">
+        {cart.map((item) => (
+          <div
+            key={item.id}
+            className="bg-surface p-3 rounded-3xl flex items-center gap-4 shadow-sm border border-border relative animate-slide-up"
+          >
+            <button
+              onClick={() => removeItem(item.id)}
+              className="absolute -top-2 -right-2 bg-danger text-white rounded-full w-6 h-6 flex items-center justify-center shadow-sm z-10 btn-press"
+              aria-label={`Hapus ${item.name}`}
+            >
+              <X size={12} strokeWidth={3} />
+            </button>
+
+            <div className="w-20 h-20 bg-surface-alt rounded-2xl overflow-hidden shrink-0">
+              <img
+                src={item.image_url || 'https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?w=400&q=75'}
+                alt={item.name}
+                className="w-full h-full object-cover"
+              />
+            </div>
+
+            <div className="flex-1 min-w-0">
+              <h3 className="font-bold text-sm text-text truncate">{item.name}</h3>
+              {item.notes && (
+                <p className="text-[10px] text-text-secondary truncate mt-0.5">{item.notes}</p>
+              )}
+              <p className="font-extrabold text-sm mt-2 text-primary">
+                Rp {(item.price * item.quantity).toLocaleString('id-ID')}
+              </p>
+            </div>
+
+            {/* Quantity — simple inline stepper */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                onClick={() => decrement(item.id)}
+                className="w-8 h-8 rounded-xl bg-surface-alt border border-border flex items-center justify-center text-text-secondary btn-press"
+                aria-label="Kurangi"
+              >
+                <Minus size={14} strokeWidth={2.5} />
+              </button>
+              <span className="text-sm font-bold text-text w-6 text-center">{item.quantity}</span>
+              <button
+                onClick={() => increment(item.id)}
+                className="w-8 h-8 rounded-xl bg-primary text-white flex items-center justify-center btn-press"
+                aria-label="Tambah"
+              >
+                <Plus size={14} strokeWidth={2.5} />
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ─── Promo Code ─── */}
+      <div className="px-5 mb-5 animate-slide-up" style={{ animationDelay: '100ms' }}>
+        <div className="bg-surface rounded-3xl p-4 shadow-sm border border-border">
+          <label className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest mb-2 block flex items-center gap-1.5">
+            <Tag size={12} /> Kode Promo
+          </label>
+          {promoApplied ? (
+            <div className="flex items-center gap-2 bg-success-light p-3 rounded-xl border border-success/20">
+              <CheckCircle2 size={16} className="text-success shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-bold text-success">{promoApplied.code}</p>
+                <p className="text-[10px] text-text-secondary">
+                  {promoApplied.discount_percent > 0 && `Diskon ${promoApplied.discount_percent}%`}
+                  {promoApplied.discount_percent > 0 && promoApplied.discount_amount > 0 && ' + '}
+                  {promoApplied.discount_amount > 0 && `Potongan Rp ${promoApplied.discount_amount.toLocaleString('id-ID')}`}
+                </p>
+              </div>
+              <button onClick={removePromo} className="w-7 h-7 bg-surface rounded-lg flex items-center justify-center btn-press">
+                <X size={12} className="text-text-secondary" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={promoCode}
+                onChange={(e) => setPromoCode(e.target.value.toUpperCase())}
+                placeholder="Masukkan kode..."
+                className="flex-1 px-4 py-3 bg-surface-alt rounded-xl border border-border text-sm font-bold text-text uppercase"
+              />
+              <button
+                onClick={applyPromo}
+                disabled={promoLoading}
+                className="px-4 py-3 bg-primary text-white rounded-xl text-xs font-bold btn-press disabled:opacity-60"
+              >
+                {promoLoading ? '...' : 'Pakai'}
+              </button>
+            </div>
+          )}
+          {promoError && (
+            <p className="text-[10px] text-danger font-bold mt-2">{promoError}</p>
+          )}
+        </div>
+      </div>
+
+      {/* ─── Payment Section ─── */}
+      <div className="px-5 mb-5 animate-slide-up" style={{ animationDelay: '120ms' }}>
+        <div className="bg-surface rounded-3xl p-5 shadow-sm border border-border">
+          {/* Subtotal & Ongkir */}
+          <div className="space-y-2 mb-3">
+            <div className="flex justify-between text-sm text-text-secondary font-medium">
+              <span>Subtotal ({cart.reduce((s, i) => s + i.quantity, 0)} item)</span>
+              <span>Rp {subtotal.toLocaleString('id-ID')}</span>
+            </div>
+            {type === 'delivery' && (
+              <div className="flex justify-between text-sm">
+                <span className="text-text-secondary font-medium">Ongkir</span>
+                <span className={`font-bold ${ongkir === 0 ? 'text-success' : 'text-text'}`}>
+                  {ongkir === 0 ? '🎉 Gratis!' : `Rp ${ongkir.toLocaleString('id-ID')}`}
+                </span>
+              </div>
+            )}
+            {type === 'delivery' && subtotal < 40000 && (
+              <p className="text-[10px] text-text-tertiary">
+                Belanja <span className="font-bold text-primary">Rp {(40000 - subtotal).toLocaleString('id-ID')}</span> lagi untuk gratis ongkir!
+              </p>
+            )}
+            {payment === 'qris' && (
+              <div className="flex justify-between text-sm">
+                <span className="text-text-secondary font-medium">Biaya Admin</span>
+                <span className="text-text font-bold">Rp {ADMIN_FEE.toLocaleString('id-ID')}</span>
+              </div>
+            )}
+            {discount > 0 && (
+              <div className="flex justify-between text-sm">
+                <span className="text-success font-bold">Diskon ({promoApplied?.code})</span>
+                <span className="text-success font-bold">-Rp {discount.toLocaleString('id-ID')}</span>
+              </div>
+            )}
+          </div>
+          <div className="border-t border-dashed border-border pt-3 flex justify-between items-center mb-6">
+            <span className="font-extrabold text-lg text-text">Total</span>
+            <span className="font-extrabold text-lg text-primary">Rp {total.toLocaleString('id-ID')}</span>
+          </div>
+
+          {/* Payment Method — simple toggle like type selector */}
+          <label className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest mb-2 block">
+            Metode Pembayaran
+          </label>
+          <div className="flex gap-2 mb-4">
+            {[
+              { key: 'cash', label: 'Cash / COD', icon: CreditCard },
+              { key: 'qris', label: 'Transfer / QRIS', icon: ScanLine },
+            ].map(({ key, label, icon: Icon }) => (
+              <button
+                key={key}
+                onClick={() => setPayment(key)}
+                className={`flex-1 py-3 text-xs font-bold rounded-2xl transition-all duration-200 flex items-center justify-center gap-1.5 btn-press border ${
+                  payment === key
+                    ? 'bg-primary text-white border-primary shadow-md'
+                    : 'bg-surface-alt text-text-secondary border-border'
+                }`}
+              >
+                <Icon size={14} />
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* QRIS / Transfer Upload */}
+          {payment === 'qris' && (
+            <div className="bg-surface-alt p-4 rounded-2xl border border-border animate-scale-in space-y-3">
+              <p className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest text-center">
+                Transfer / QRIS
+              </p>
+
+              {/* QRIS Image from admin settings */}
+              {qrisUrl ? (
+                <img
+                  src={qrisUrl}
+                  alt="QRIS"
+                  className="w-36 h-36 mx-auto object-contain rounded-xl border border-border bg-white"
+                />
+              ) : (
+                <img
+                  src="/qris.png"
+                  alt="QRIS"
+                  className="w-28 h-28 mx-auto object-contain mix-blend-multiply rounded-xl"
+                />
+              )}
+
+              {/* Bank info from admin settings */}
+              {(bankName || bankAccount) && (
+                <div className="bg-surface rounded-xl p-3 border border-border text-center">
+                  <p className="text-[10px] text-text-tertiary font-bold uppercase tracking-widest mb-1">Rekening Transfer</p>
+                  {bankName && <p className="text-sm font-bold text-text">{bankName}</p>}
+                  {bankAccount && <p className="text-base font-extrabold text-primary tracking-wider">{bankAccount}</p>}
+                </div>
+              )}
+
+              <p className="text-[10px] text-text-secondary text-center leading-relaxed">
+                Scan QRIS atau transfer ke rekening di atas, lalu upload bukti
+              </p>
+
+              <div className="bg-primary-light rounded-xl p-2.5 text-center">
+                <p className="text-[10px] text-primary font-bold">
+                  ⓘ Biaya admin Rp {ADMIN_FEE.toLocaleString('id-ID')} untuk metode ini
+                </p>
+              </div>
+
+              {/* File upload */}
+              <label className="flex items-center justify-center gap-2 bg-primary text-white py-3 rounded-2xl font-bold text-sm cursor-pointer btn-press border border-primary">
+                <Upload size={16} />
+                {file ? file.name : 'Upload Bukti Transfer'}
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => setFile(e.target.files[0])}
+                  className="hidden"
+                />
+              </label>
+              {file && (
+                <p className="text-[10px] text-success font-bold text-center">
+                  ✓ File terpilih: {file.name}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ─── Submit Button ─── */}
+      <div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md px-5 pb-5 pt-3 bg-gradient-to-t from-surface-alt via-surface-alt to-transparent z-50">
+        <button
+          onClick={handleOrder}
+          disabled={loading}
+          className="w-full bg-primary text-white py-3.5 rounded-full font-bold text-sm shadow-lg btn-press flex items-center justify-center gap-2 disabled:opacity-60 transition-colors duration-200"
+        >
+          {loading ? (
+            <>
+              <Loader2 size={18} className="animate-spin" />
+              Memproses...
+            </>
+          ) : (
+            `Bayar — Rp ${total.toLocaleString('id-ID')}`
+          )}
+        </button>
+      </div>
+    </main>
+  )
+}
+
+# ------------------------------------------------
+# src/app/checkout/page.js
+# ------------------------------------------------
+'use client'
+import { useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+
+// Halaman checkout sudah digabung ke /cart
+// Redirect otomatis ke cart
+export default function CheckoutPage() {
+  const router = useRouter()
+  useEffect(() => {
+    router.replace('/cart')
+  }, [router])
+  return null
+}
+
+# ------------------------------------------------
+# src/app/history/page.js
+# ------------------------------------------------
+'use client'
+
+import { useEffect, useState } from 'react'
+import Link from 'next/link'
+import { useRouter } from 'next/navigation'
+import { supabase } from '@/lib/supabase'
+import PageHeader from '@/components/PageHeader'
+import EmptyState from '@/components/EmptyState'
+import StatusBadge from '@/components/StatusBadge'
+import { ListSkeleton } from '@/components/LoadingSkeleton'
+import { ClipboardList, Star, X, RefreshCw } from '@/components/icons'
+import { getLSJSON, setLSJSON } from '@/lib/storage'
+
+/* ─── Order Timeline Steps ─── */
+const STEPS = [
+  { key: 'Menunggu', label: 'Pesanan Diterima', desc: 'Menunggu konfirmasi admin' },
+  { key: 'Diproses', label: 'Sedang Disiapkan', desc: 'Dapur sedang menyiapkan pesananmu' },
+  { key: 'Diantar', label: 'Dalam Pengiriman', desc: 'Kurir sedang menuju lokasimu / Siap diambil' },
+  { key: 'Selesai', label: 'Selesai', desc: 'Selamat menikmati!' },
+]
+
+const STATUS_INDEX = { Menunggu: 0, Diproses: 1, Diantar: 2, Selesai: 3 }
+
+export default function HistoryPage() {
+  const router = useRouter()
+  const [orders, setOrders] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  /* Review state */
+  const [reviewOrder, setReviewOrder] = useState(null)
+  const [reviewRating, setReviewRating] = useState(5)
+  const [reviewComment, setReviewComment] = useState('')
+  const [reviewedIds, setReviewedIds] = useState([])
+  const [submittingReview, setSubmittingReview] = useState(false)
+
+  const fetchOrders = async () => {
+    const myOrders = getLSJSON('my_orders', [])
+
+    if (myOrders.length === 0) {
+      setOrders([])
+      setLoading(false)
+      return
+    }
+
+    const { data } = await supabase
+      .from('orders')
+      .select('*')
+      .in('id', myOrders)
+      .order('created_at', { ascending: false })
+
+    setOrders(data || [])
+    setLoading(false)
+  }
+
+  useEffect(() => {
+    fetchOrders()
+    setReviewedIds(getLSJSON('reviewed_orders', []))
+
+    /* ─── Supabase Realtime: listen for order status changes ─── */
+    const myOrders = getLSJSON('my_orders', [])
+    if (myOrders.length === 0) return
+
+    const channel = supabase
+      .channel('order-updates')
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'orders' },
+        (payload) => {
+          const updated = payload.new
+          if (myOrders.includes(updated.id)) {
+            setOrders((prev) =>
+              prev.map((o) => (o.id === updated.id ? { ...o, ...updated } : o))
+            )
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [])
+
+  /* ─── Submit Review ─── */
+  const submitReview = async () => {
+    if (!reviewOrder) return
+    setSubmittingReview(true)
+
+    await supabase.from('reviews').insert([{
+      order_id: reviewOrder.id,
+      rating: reviewRating,
+      comment: reviewComment,
+    }])
+
+    const newReviewed = [...reviewedIds, reviewOrder.id]
+    setReviewedIds(newReviewed)
+    setLSJSON('reviewed_orders', newReviewed)
+    setReviewOrder(null)
+    setReviewRating(5)
+    setReviewComment('')
+    setSubmittingReview(false)
+  }
+
+  return (
+    <div className="min-h-screen bg-bg pb-32">
+      <PageHeader
+        title="Riwayat Pesanan"
+        onBack={() => router.push('/')}
+        rightAction={
+          <button
+            onClick={fetchOrders}
+            className="w-10 h-10 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
+            aria-label="Refresh"
+          >
+            <RefreshCw size={18} className="text-primary" />
+          </button>
+        }
+      />
+
+      {/* Realtime indicator */}
+      <div className="px-5 pt-3">
+        <div className="flex items-center gap-2 text-[10px] text-success font-bold">
+          <span className="w-2 h-2 bg-success rounded-full animate-pulse" />
+          Live — status otomatis update
+        </div>
+      </div>
+
+      <div className="p-5">
+        {loading ? (
+          <ListSkeleton count={2} />
+        ) : orders.length === 0 ? (
+          <EmptyState
+            icon={ClipboardList}
+            title="Belum ada pesanan"
+            description="Pesananmu akan tampil di sini"
+            actionLabel="Pesan Sekarang"
+            actionHref="/menu"
+          />
+        ) : (
+          <div className="space-y-4 stagger-children">
+            {orders.map((order) => {
+              const currentStep = STATUS_INDEX[order.status] ?? 0
+              const isComplete = order.status === 'Selesai'
+              const hasReviewed = reviewedIds.includes(order.id)
+
+              return (
+                <div
+                  key={order.id}
+                  className="bg-surface rounded-3xl p-6 shadow-sm border border-border animate-slide-up"
+                >
+                  {/* ─── Order Header ─── */}
+                  <div className="flex justify-between items-start mb-6">
+                    <div>
+                      <p className="text-[10px] text-text-tertiary font-mono mb-1">
+                        #{order.id?.slice(0, 8).toUpperCase()}
+                      </p>
+                      <p className="text-xl font-extrabold text-text tracking-tight">
+                        Rp {order.total_harga?.toLocaleString('id-ID')}
+                      </p>
+                    </div>
+                    <StatusBadge status={order.status} />
+                  </div>
+
+                  {/* ─── Timeline ─── */}
+                  <div className="relative pl-6 space-y-5 before:absolute before:inset-y-2 before:left-[11px] before:w-[2px] before:bg-border">
+                    {STEPS.map((step, index) => {
+                      const isDone = index <= currentStep
+                      const isActive = index === currentStep
+
+                      return (
+                        <div key={step.key} className="relative">
+                          <div
+                            className={`absolute -left-[29px] top-1 w-3.5 h-3.5 rounded-full border-[3px] transition-all duration-500 ${
+                              isDone
+                                ? 'bg-primary border-primary-light'
+                                : 'bg-surface-alt border-surface'
+                            } ${isActive ? 'ring-4 ring-primary-glow scale-110' : ''}`}
+                          />
+                          <h4 className={`text-sm font-bold transition-colors ${isDone ? 'text-text' : 'text-text-tertiary'}`}>
+                            {step.label}
+                          </h4>
+                          <p className={`text-[10px] mt-0.5 ${isDone ? 'text-text-secondary' : 'text-text-tertiary'}`}>
+                            {step.desc}
+                          </p>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {/* ─── Items Summary ─── */}
+                  {order.items?.length > 0 && (
+                    <div className="mt-6 pt-5 border-t border-border flex flex-wrap gap-2">
+                      {order.items.map((item, i) => (
+                        <span
+                          key={i}
+                          className="bg-surface-alt text-text border border-border text-[10px] font-bold px-3 py-1.5 rounded-full"
+                        >
+                          {item.name}{' '}
+                          <span className="text-primary ml-1">x{item.quantity}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* ─── Review Button (only when complete & not reviewed) ─── */}
+                  {isComplete && !hasReviewed && (
+                    <button
+                      onClick={() => setReviewOrder(order)}
+                      className="mt-4 w-full bg-accent text-white py-3 rounded-2xl font-bold text-sm btn-press flex items-center justify-center gap-2 shadow-md"
+                    >
+                      <Star size={16} />
+                      Beri Rating & Review
+                    </button>
+                  )}
+                  {isComplete && hasReviewed && (
+                    <p className="mt-4 text-center text-[10px] text-success font-bold">✓ Sudah di-review, terima kasih!</p>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* ═══ Review Modal ═══ */}
+      {reviewOrder && (
+        <div className="fixed inset-0 z-[9999] bg-black/50 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
+          <div className="bg-surface w-full max-w-sm rounded-3xl p-6 shadow-2xl animate-scale-in">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-extrabold text-text">Review Pesanan</h2>
+              <button onClick={() => setReviewOrder(null)} className="w-8 h-8 bg-surface-alt rounded-full flex items-center justify-center btn-press">
+                <X size={14} />
+              </button>
+            </div>
+
+            <p className="text-xs text-text-secondary mb-4">
+              #{reviewOrder.id?.slice(0, 8).toUpperCase()} — Rp {reviewOrder.total_harga?.toLocaleString('id-ID')}
+            </p>
+
+            {/* Star Rating */}
+            <div className="flex justify-center gap-2 mb-6">
+              {[1, 2, 3, 4, 5].map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setReviewRating(s)}
+                  className={`w-12 h-12 rounded-full flex items-center justify-center text-xl transition-all duration-200 btn-press border-2 ${
+                    s <= reviewRating ? 'bg-accent text-white border-accent scale-110' : 'bg-surface-alt text-text-tertiary border-border'
+                  }`}
+                >
+                  ⭐
+                </button>
+              ))}
+            </div>
+
+            {/* Comment */}
+            <textarea
+              value={reviewComment}
+              onChange={(e) => setReviewComment(e.target.value)}
+              placeholder="Komentar (opsional)..."
+              rows={3}
+              className="w-full px-4 py-3 bg-surface-alt rounded-xl border border-border text-sm font-medium text-text resize-none mb-4"
+            />
+
+            <button
+              onClick={submitReview}
+              disabled={submittingReview}
+              className="w-full bg-primary text-white py-4 rounded-2xl font-bold shadow-lg btn-press flex items-center justify-center gap-2 disabled:opacity-60"
+            >
+              {submittingReview ? 'Mengirim...' : 'Kirim Review'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+# ------------------------------------------------
+# src/app/login/page.js
+# ------------------------------------------------
+'use client'
+
+import { useState } from 'react'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { supabase } from '@/lib/supabase'
+import FormField from '@/components/FormField'
+import { Lock, Loader2, ChevronLeft } from '@/components/icons'
+
+export default function LoginPage() {
+  const router = useRouter()
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const handleLogin = async (e) => {
+    e.preventDefault()
+    setLoading(true)
+    setError('')
+
+    const { error: authError } = await supabase.auth.signInWithPassword({ email, password })
+
+    if (authError) {
+      setError('Email atau password salah.')
+      setLoading(false)
+    } else {
+      router.push('/admin')
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-bg flex items-center justify-center p-6 relative">
+      {/* Back to Home */}
+      <Link
+        href="/"
+        className="absolute top-6 left-6 w-10 h-10 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press z-10"
+        aria-label="Kembali ke Beranda"
+      >
+        <ChevronLeft size={18} className="text-text" />
+      </Link>
+
+      <div className="w-full max-w-sm animate-scale-in">
+        {/* Card */}
+        <div className="bg-surface rounded-3xl p-8 shadow-lg border border-border">
+          {/* Icon */}
+          <div className="text-center mb-8">
+            <div className="w-16 h-16 bg-primary rounded-2xl mx-auto flex items-center justify-center mb-5 shadow-lg">
+              <Lock size={28} className="text-white" />
+            </div>
+            <h1 className="text-xl font-extrabold text-text">Owner Login</h1>
+            <p className="text-xs text-text-secondary mt-1">Masuk ke dapur J-Corners</p>
+          </div>
+
+          {/* Form */}
+          <form onSubmit={handleLogin} className="flex flex-col gap-4">
+            <FormField
+              label="Email Address"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="admin@gmail.com"
+              required
+            />
+            <FormField
+              label="Password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              required
+            />
+
+            {/* Error */}
+            {error && (
+              <div className="text-danger bg-danger-light text-xs font-bold text-center p-3 rounded-xl border border-red-100 animate-scale-in">
+                {error}
+              </div>
+            )}
+
+            {/* Submit */}
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-primary text-white py-4 rounded-xl font-bold shadow-lg btn-press mt-2 flex justify-center items-center gap-2 disabled:opacity-60"
+            >
+              {loading ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  Memverifikasi...
+                </>
+              ) : (
+                'Masuk Dashboard'
+              )}
+            </button>
+          </form>
+        </div>
+
+        {/* Footer */}
+        <p className="text-center text-[10px] text-text-tertiary mt-6">
+          © 2026 J-Corners. All rights reserved.
+        </p>
+      </div>
+    </main>
+  )
+}
+
+# ------------------------------------------------
+# src/app/admin/page.js
+# ------------------------------------------------
+'use client'
+
+import { useEffect, useState, useRef } from 'react'
+import { useRouter } from 'next/navigation'
+import { supabase } from '@/lib/supabase'
+import { getLS, setLS } from '@/lib/storage'
+import StatusBadge from '@/components/StatusBadge'
+import FormField from '@/components/FormField'
+import { PageLoader } from '@/components/LoadingSkeleton'
+import {
+  RefreshCw, LogOut, ClipboardList, Store, Plus, X,
+  MapPin, CreditCard, Link2, Edit3, Trash2, Loader2,
+  Package, CheckCircle2, Truck as TruckIcon, Clock, Upload, ScanLine,
+  BarChart3, Download, FileText, Tag, MenuIcon, Eye,
+  Calendar, TrendingUp, Star, Settings, Gift, Printer,
+} from '@/components/icons'
+
+/* ─── Chart.js ─── */
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  LineElement,
+  PointElement,
+  Title,
+  Tooltip,
+  Filler,
+} from 'chart.js'
+import { Line } from 'react-chartjs-2'
+
+ChartJS.register(CategoryScale, LinearScale, BarElement, LineElement, PointElement, Title, Tooltip, Filler)
+
+/* ─── Constants ─── */
+const STATUS_FLOW = ['Menunggu', 'Diproses', 'Diantar', 'Selesai']
+const CATEGORIES = ['Food', 'Bakery', 'Coffee', 'Non Coffee']
+
+const INITIAL_FORM = {
+  id: null, name: '', category: 'Food', price: '', description: '',
+  image: null, existing_image: '', available: true,
+}
+
+const PROMO_INIT = {
+  id: null, code: '', discount_percent: '', discount_amount: '',
+  min_order: '', max_usage: '100', valid_until: '',
+}
+
+/* ─── Helpers ─── */
+const fmtPrice = (v) => {
+  const num = String(v).replace(/\D/g, '')
+  return num.replace(/\B(?=(\d{3})+(?!\d))/g, '.')
+}
+const parsePrice = (v) => parseInt(String(v).replace(/\./g, ''), 10) || 0
+const fmtRp = (n) => `Rp ${(n || 0).toLocaleString('id-ID')}`
+const fmtDate = (d) => new Date(d).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })
+const fmtTime = (d) => new Date(d).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+
+/* ─── Sidebar Items ─── */
+const NAV_ITEMS = [
+  { key: 'dashboard', label: 'Dashboard', icon: BarChart3 },
+  { key: 'orders', label: 'Pesanan', icon: ClipboardList },
+  { key: 'menu', label: 'Menu', icon: Store },
+  { key: 'promo', label: 'Promo', icon: Tag },
+  { key: 'reports', label: 'Laporan', icon: FileText },
+  { key: 'settings', label: 'Settings', icon: Settings },
+]
+
+/* ═══════════════════════════════════════════════════════════ */
+export default function AdminPage() {
+  const router = useRouter()
+  const [activeTab, setActiveTab] = useState('dashboard')
+  const [loading, setLoading] = useState(true)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  /* Data */
+  const [orders, setOrders] = useState([])
+  const [products, setProducts] = useState([])
+  const [promos, setPromos] = useState([])
+  const [reviews, setReviews] = useState([])
+  const [updatingId, setUpdatingId] = useState(null)
+
+  /* Menu Modal */
+  const [modalOpen, setModalOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [form, setForm] = useState(INITIAL_FORM)
+
+  /* Promo Modal */
+  const [promoModal, setPromoModal] = useState(false)
+  const [promoForm, setPromoForm] = useState(PROMO_INIT)
+
+  /* Proof popup */
+  const [proofUrl, setProofUrl] = useState(null)
+
+  /* Settings */
+  const [storeAddress, setStoreAddress] = useState('')
+  const [storePhone, setStorePhone] = useState('')
+  const [qrisImage, setQrisImage] = useState(null)
+  const [qrisUrl, setQrisUrl] = useState('')
+  const [bankAccount, setBankAccount] = useState('')
+  const [bankName, setBankName] = useState('')
+  const [settingsSaved, setSettingsSaved] = useState(false)
+
+  /* Report filters */
+  const [reportMonth, setReportMonth] = useState(() => {
+    const d = new Date()
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+  })
+
+  /* ─── Auth & Fetch ─── */
+  const fetchAll = async () => {
+    setLoading(true)
+    const { data: { session } } = await supabase.auth.getSession()
+    if (!session) { router.replace('/login'); return }
+
+    const [o, p, pr, r] = await Promise.all([
+      supabase.from('orders').select('*').order('created_at', { ascending: false }),
+      supabase.from('products').select('*').order('created_at', { ascending: false }),
+      supabase.from('promo_codes').select('*').order('created_at', { ascending: false }),
+      supabase.from('reviews').select('*').order('created_at', { ascending: false }),
+    ])
+
+    setOrders(o.data || [])
+    setProducts(p.data || [])
+    setPromos(pr.data || [])
+    setReviews(r.data || [])
+    setLoading(false)
+  }
+
+  useEffect(() => {
+    fetchAll()
+    setStoreAddress(getLS('store_address', 'Jl. Telekomunikasi No. 1, Sukapura, Dayeuhkolot, Bandung, Jawa Barat 40257'))
+    setStorePhone(getLS('store_phone', '628123456789'))
+    setQrisUrl(getLS('store_qris_url', ''))
+    setBankAccount(getLS('store_bank_account', ''))
+    setBankName(getLS('store_bank_name', ''))
+  }, [router])
+
+  /* ─── Stats (revenue = Selesai only) ─── */
+  const completedOrders = orders.filter((o) => o.status === 'Selesai')
+  const revenue = completedOrders.reduce((sum, o) => sum + (o.total_harga || 0), 0)
+  const todayOrders = orders.filter((o) => new Date(o.created_at).toDateString() === new Date().toDateString())
+  const todayRevenue = todayOrders.filter((o) => o.status === 'Selesai').reduce((s, o) => s + (o.total_harga || 0), 0)
+  const avgRating = reviews.length > 0 ? (reviews.reduce((s, r) => s + r.rating, 0) / reviews.length).toFixed(1) : '—'
+
+  const stats = {
+    total: orders.length,
+    pending: orders.filter((o) => o.status === 'Menunggu').length,
+    processing: orders.filter((o) => o.status === 'Diproses').length,
+    delivering: orders.filter((o) => o.status === 'Diantar').length,
+    completed: completedOrders.length,
+    revenue,
+    menuCount: products.length,
+  }
+
+  /* ─── Revenue Chart Data (7 days) ─── */
+  const chartData = (() => {
+    const days = []
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date()
+      d.setDate(d.getDate() - i)
+      days.push(d)
+    }
+    const labels = days.map((d) => d.toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric' }))
+    const data = days.map((d) => {
+      const ds = d.toDateString()
+      return completedOrders
+        .filter((o) => new Date(o.created_at).toDateString() === ds)
+        .reduce((s, o) => s + (o.total_harga || 0), 0)
+    })
+    return {
+      labels,
+      datasets: [{
+        label: 'Pendapatan',
+        data,
+        borderColor: '#7A1B1B',
+        backgroundColor: 'rgba(122, 27, 27, 0.1)',
+        fill: true,
+        tension: 0.4,
+        pointBackgroundColor: '#7A1B1B',
+        pointRadius: 4,
+      }],
+    }
+  })()
+
+  const chartOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => fmtRp(ctx.parsed.y) } } },
+    scales: {
+      y: { beginAtZero: true, ticks: { callback: (v) => v >= 1000 ? `${v / 1000}k` : v } },
+      x: { grid: { display: false } },
+    },
+  }
+
+  /* ─── Order Actions ─── */
+  const updateStatus = async (id, newStatus) => {
+    setUpdatingId(id)
+    const { error } = await supabase.from('orders').update({ status: newStatus }).eq('id', id)
+    if (!error) {
+      setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status: newStatus } : o)))
+    }
+    setUpdatingId(null)
+  }
+
+  /* ─── Menu Actions ─── */
+  const openModal = (product = null) => {
+    if (product) {
+      setForm({
+        id: product.id, name: product.name, category: product.category,
+        price: fmtPrice(product.price), description: product.description || '',
+        image: null, existing_image: product.image_url || '', available: product.available !== false,
+      })
+    } else {
+      setForm(INITIAL_FORM)
+    }
+    setModalOpen(true)
+  }
+
+  const handleSaveMenu = async (e) => {
+    e.preventDefault()
+    setSaving(true)
+    let imageUrl = form.existing_image
+
+    if (form.image) {
+      const ext = form.image.name.split('.').pop()
+      const fname = `menu_${Date.now()}.${ext}`
+      const { error } = await supabase.storage.from('product-images').upload(fname, form.image)
+      if (!error) imageUrl = supabase.storage.from('product-images').getPublicUrl(fname).data.publicUrl
+    }
+
+    const payload = {
+      name: form.name, category: form.category, price: parsePrice(form.price),
+      description: form.description, image_url: imageUrl, available: form.available,
+    }
+
+    if (form.id) {
+      await supabase.from('products').update(payload).eq('id', form.id)
+    } else {
+      await supabase.from('products').insert([payload])
+    }
+
+    setSaving(false)
+    setModalOpen(false)
+    fetchAll()
+  }
+
+  const handleDeleteMenu = async (id) => {
+    await supabase.from('products').delete().eq('id', id)
+    setProducts((prev) => prev.filter((p) => p.id !== id))
+  }
+
+  const updateForm = (field, value) => setForm((prev) => ({ ...prev, [field]: value }))
+
+  /* ─── Promo Actions ─── */
+  const openPromoModal = (promo = null) => {
+    if (promo) {
+      setPromoForm({
+        id: promo.id, code: promo.code,
+        discount_percent: promo.discount_percent || '',
+        discount_amount: promo.discount_amount ? fmtPrice(promo.discount_amount) : '',
+        min_order: promo.min_order ? fmtPrice(promo.min_order) : '',
+        max_usage: String(promo.max_usage || 100),
+        valid_until: promo.valid_until ? promo.valid_until.slice(0, 10) : '',
+      })
+    } else {
+      setPromoForm(PROMO_INIT)
+    }
+    setPromoModal(true)
+  }
+
+  const handleSavePromo = async (e) => {
+    e.preventDefault()
+    const payload = {
+      code: promoForm.code.toUpperCase(),
+      discount_percent: parseInt(promoForm.discount_percent) || 0,
+      discount_amount: parsePrice(promoForm.discount_amount),
+      min_order: parsePrice(promoForm.min_order),
+      max_usage: parseInt(promoForm.max_usage) || 100,
+      valid_until: promoForm.valid_until || null,
+      is_active: true,
+    }
+
+    if (promoForm.id) {
+      await supabase.from('promo_codes').update(payload).eq('id', promoForm.id)
+    } else {
+      await supabase.from('promo_codes').insert([payload])
+    }
+    setPromoModal(false)
+    fetchAll()
+  }
+
+  const togglePromo = async (id, active) => {
+    await supabase.from('promo_codes').update({ is_active: !active }).eq('id', id)
+    setPromos((prev) => prev.map((p) => (p.id === id ? { ...p, is_active: !active } : p)))
+  }
+
+  const deletePromo = async (id) => {
+    await supabase.from('promo_codes').delete().eq('id', id)
+    setPromos((prev) => prev.filter((p) => p.id !== id))
+  }
+
+  /* ─── Settings ─── */
+  const handleSaveSettings = async () => {
+    setLS('store_address', storeAddress)
+    setLS('store_phone', storePhone)
+    setLS('store_bank_account', bankAccount)
+    setLS('store_bank_name', bankName)
+
+    if (qrisImage) {
+      const ext = qrisImage.name.split('.').pop()
+      const fname = `qris_${Date.now()}.${ext}`
+      const { error } = await supabase.storage.from('product-images').upload(fname, qrisImage)
+      if (!error) {
+        const url = supabase.storage.from('product-images').getPublicUrl(fname).data.publicUrl
+        setQrisUrl(url)
+        setLS('store_qris_url', url)
+      }
+    }
+    setSettingsSaved(true)
+    setTimeout(() => setSettingsSaved(false), 2000)
+  }
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    router.replace('/login')
+  }
+
+  /* ─── Export ─── */
+  const filteredOrders = orders.filter((o) => {
+    const d = new Date(o.created_at)
+    const m = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+    return m === reportMonth
+  })
+
+  const exportExcel = async () => {
+    const XLSX = (await import('xlsx')).default || await import('xlsx')
+    const rows = filteredOrders.map((o) => ({
+      ID: o.id?.slice(0, 8).toUpperCase(),
+      Pelanggan: o.nama_pelanggan || o.nama || '-',
+      Status: o.status,
+      Total: o.total_harga || 0,
+      Metode: o.metode_bayar || '-',
+      Tanggal: fmtDate(o.created_at),
+    }))
+    const ws = XLSX.utils.json_to_sheet(rows)
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Laporan')
+    XLSX.writeFile(wb, `laporan_jcorners_${reportMonth}.xlsx`)
+  }
+
+  const exportPrint = () => window.print()
+
+  /* ─── Loading ─── */
+  if (loading) return <PageLoader />
+
+  return (
+    <>
+      {/* ═══ Sidebar Overlay (mobile) ═══ */}
+      {sidebarOpen && (
+        <div className="fixed inset-0 z-[998] bg-black/40 backdrop-blur-sm lg:hidden" onClick={() => setSidebarOpen(false)} />
+      )}
+
+      {/* ═══ Sidebar ═══ */}
+      <aside className={`fixed top-0 left-0 z-[999] h-full w-64 bg-surface border-r border-border shadow-2xl transition-transform duration-300 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="flex items-center justify-between px-5 py-5 border-b border-border">
+          <div>
+            <h1 className="text-base font-extrabold text-text leading-none">Dapur J-Corners</h1>
+            <p className="text-[9px] text-text-tertiary font-bold uppercase tracking-widest mt-0.5">Panel Owner</p>
+          </div>
+          <button onClick={() => setSidebarOpen(false)} className="lg:hidden w-8 h-8 rounded-full bg-surface-alt flex items-center justify-center btn-press">
+            <X size={14} />
+          </button>
+        </div>
+
+        <nav className="p-3 space-y-1">
+          {NAV_ITEMS.map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              onClick={() => { setActiveTab(key); setSidebarOpen(false) }}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-bold transition-all duration-200 btn-press ${
+                activeTab === key ? 'bg-primary text-white shadow-md' : 'text-text-secondary hover:bg-surface-alt'
+              }`}
+            >
+              <Icon size={18} />
+              {label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="absolute bottom-0 left-0 right-0 p-3 border-t border-border">
+          <button onClick={handleLogout} className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-bold text-danger bg-danger-light btn-press">
+            <LogOut size={18} />
+            Logout
+          </button>
+        </div>
+      </aside>
+
+      {/* ═══ Main Content ═══ */}
+      <main className="min-h-screen bg-bg lg:ml-64 pb-12">
+        {/* Toast */}
+        {settingsSaved && (
+          <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[9999] bg-success text-white text-sm font-bold px-6 py-3 rounded-2xl shadow-xl animate-slide-down flex items-center gap-2">
+            <CheckCircle2 size={16} /> Pengaturan tersimpan!
+          </div>
+        )}
+
+        {/* Mobile Header */}
+        <header className="lg:hidden bg-surface px-5 py-4 sticky top-0 z-40 shadow-sm border-b border-border flex items-center justify-between">
+          <button onClick={() => setSidebarOpen(true)} className="w-10 h-10 bg-surface-alt rounded-full flex items-center justify-center btn-press">
+            <MenuIcon size={18} />
+          </button>
+          <h1 className="text-sm font-extrabold text-text">
+            {NAV_ITEMS.find((n) => n.key === activeTab)?.label || 'Admin'}
+          </h1>
+          <button onClick={fetchAll} className="w-10 h-10 bg-surface-alt rounded-full flex items-center justify-center text-primary btn-press">
+            <RefreshCw size={18} />
+          </button>
+        </header>
+
+        {/* Desktop Header */}
+        <header className="hidden lg:flex bg-surface px-8 py-4 sticky top-0 z-40 shadow-sm border-b border-border items-center justify-between">
+          <h1 className="text-lg font-extrabold text-text">
+            {NAV_ITEMS.find((n) => n.key === activeTab)?.label || 'Admin'}
+          </h1>
+          <button onClick={fetchAll} className="w-10 h-10 bg-surface-alt rounded-full flex items-center justify-center text-primary btn-press">
+            <RefreshCw size={18} />
+          </button>
+        </header>
+
+        <div className="p-4 lg:p-8">
+          {/* ═══════════ DASHBOARD ═══════════ */}
+          {activeTab === 'dashboard' && (
+            <div className="space-y-6 animate-slide-up">
+              {/* Stats Grid */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                {[
+                  { label: 'Pesanan Hari Ini', value: todayOrders.length, icon: Package, color: 'text-primary', bg: 'bg-primary-light' },
+                  { label: 'Revenue Hari Ini', value: fmtRp(todayRevenue), icon: TrendingUp, color: 'text-success', bg: 'bg-success-light' },
+                  { label: 'Total Menu', value: stats.menuCount, icon: Store, color: 'text-primary', bg: 'bg-primary-light' },
+                  { label: 'Rating', value: `⭐ ${avgRating}`, icon: Star, color: 'text-accent', bg: 'bg-accent-light' },
+                ].map(({ label, value, icon: Icon, color, bg }) => (
+                  <div key={label} className={`${bg} rounded-2xl p-4 border border-border`}>
+                    <div className="flex items-center gap-2 mb-2">
+                      <Icon size={16} className={color} />
+                      <span className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest">{label}</span>
+                    </div>
+                    <p className={`text-lg font-extrabold ${color}`}>{value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Revenue Chart */}
+              <div className="bg-surface rounded-3xl p-5 border border-border shadow-sm">
+                <h3 className="text-sm font-extrabold text-text mb-4 flex items-center gap-2">
+                  <BarChart3 size={16} className="text-primary" />
+                  Pendapatan 7 Hari Terakhir
+                  <span className="ml-auto text-xs font-bold text-success">{fmtRp(revenue)} total</span>
+                </h3>
+                <div className="h-48 lg:h-64">
+                  <Line data={chartData} options={chartOptions} />
+                </div>
+              </div>
+
+              {/* Order Status Cards */}
+              <div className="grid grid-cols-4 gap-2">
+                {[
+                  { label: 'Menunggu', value: stats.pending, icon: Clock, color: 'text-primary', bg: 'bg-primary-light' },
+                  { label: 'Diproses', value: stats.processing, icon: Package, color: 'text-primary', bg: 'bg-primary-light' },
+                  { label: 'Diantar', value: stats.delivering, icon: TruckIcon, color: 'text-primary', bg: 'bg-primary-light' },
+                  { label: 'Selesai', value: stats.completed, icon: CheckCircle2, color: 'text-success', bg: 'bg-success-light' },
+                ].map(({ label, value, icon: Icon, color, bg }) => (
+                  <div key={label} className={`${bg} rounded-2xl p-3 text-center border border-border`}>
+                    <Icon size={16} className={`${color} mx-auto mb-1`} />
+                    <p className={`text-lg font-extrabold ${color}`}>{value}</p>
+                    <p className="text-[8px] font-bold text-text-tertiary uppercase tracking-widest">{label}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Recent Reviews */}
+              {reviews.length > 0 && (
+                <div className="bg-surface rounded-3xl p-5 border border-border shadow-sm">
+                  <h3 className="text-sm font-extrabold text-text mb-3 flex items-center gap-2">
+                    <Star size={16} className="text-accent" />
+                    Review Terbaru
+                  </h3>
+                  <div className="space-y-3">
+                    {reviews.slice(0, 5).map((r) => (
+                      <div key={r.id} className="flex items-start gap-3 bg-surface-alt p-3 rounded-xl border border-border">
+                        <div className="shrink-0 text-accent text-xs font-bold">
+                          {'⭐'.repeat(r.rating)}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs text-text font-medium truncate">{r.comment || 'Tidak ada komentar'}</p>
+                          <p className="text-[9px] text-text-tertiary mt-0.5">{fmtDate(r.created_at)}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ═══════════ ORDERS ═══════════ */}
+          {activeTab === 'orders' && (
+            <div className="space-y-3 stagger-children animate-slide-up">
+              {orders.length === 0 ? (
+                <div className="text-center py-16">
+                  <ClipboardList size={48} className="text-text-tertiary mx-auto mb-4" strokeWidth={1} />
+                  <p className="text-sm text-text-secondary font-bold">Belum ada pesanan</p>
+                </div>
+              ) : (
+                orders.map((order) => {
+                  const isUpdating = updatingId === order.id
+                  return (
+                    <div key={order.id} className="bg-surface rounded-3xl p-5 shadow-sm border border-border animate-slide-up">
+                      {/* Header */}
+                      <div className="flex justify-between items-start mb-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[9px] text-text-tertiary font-mono">#{order.id?.slice(0, 8).toUpperCase()}</p>
+                          <p className="text-sm font-bold text-text truncate">{order.nama_pelanggan || order.nama || 'Pelanggan'}</p>
+                          <p className="text-[10px] text-text-tertiary">{fmtDate(order.created_at)} • {fmtTime(order.created_at)}</p>
+                          {order.no_hp && <p className="text-[10px] text-text-secondary">HP: {order.no_hp}</p>}
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-base font-extrabold text-primary">{fmtRp(order.total_harga)}</p>
+                          <div className="mt-2"><StatusBadge status={order.status} /></div>
+                        </div>
+                      </div>
+
+                      {/* Details */}
+                      <div className="flex flex-wrap gap-1.5 mb-3">
+                        {order.alamat && (
+                          <span className="text-[10px] text-text-secondary bg-surface-alt px-2 py-1 rounded-lg border border-border inline-flex items-center gap-1">
+                            <MapPin size={10} className="text-text-tertiary shrink-0" />
+                            <span className="truncate max-w-[150px]">{order.alamat}</span>
+                          </span>
+                        )}
+                        <span className="text-[10px] text-text-secondary bg-surface-alt px-2 py-1 rounded-lg border border-border inline-flex items-center gap-1">
+                          <CreditCard size={10} className="text-text-tertiary" />
+                          {order.metode_bayar === 'qris' ? 'QRIS/Transfer' : 'Cash'}
+                        </span>
+                      </div>
+
+                      {/* Items */}
+                      {order.items?.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mb-3">
+                          {order.items.map((item, i) => (
+                            <span key={i} className="bg-primary-light text-text text-[9px] font-bold px-2 py-1 rounded-lg">
+                              {item.name} <span className="text-primary">x{item.quantity}</span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Proof — popup instead of new tab */}
+                      {order.bukti_transfer && (
+                        <button
+                          onClick={() => setProofUrl(order.bukti_transfer)}
+                          className="inline-flex items-center gap-1.5 mb-3 bg-primary-light text-primary text-[10px] font-bold px-3 py-1.5 rounded-lg border border-primary/10 btn-press"
+                        >
+                          <Eye size={11} />
+                          Lihat Bukti Transfer
+                        </button>
+                      )}
+
+                      {/* Status Update */}
+                      <div className="pt-3 border-t border-dashed border-border">
+                        <p className="text-[9px] font-bold text-text-tertiary mb-2 uppercase tracking-widest">Update Status</p>
+                        <div className="flex gap-1.5 overflow-x-auto scrollbar-hide">
+                          {STATUS_FLOW.map((status) => (
+                            <button
+                              key={status}
+                              onClick={() => updateStatus(order.id, status)}
+                              disabled={isUpdating}
+                              className={`shrink-0 px-3 py-1.5 rounded-xl text-[10px] font-bold transition-all duration-200 btn-press ${
+                                order.status === status
+                                  ? 'bg-primary text-white shadow-md'
+                                  : 'bg-surface-alt text-text-tertiary border border-border'
+                              }`}
+                            >
+                              {isUpdating && order.status === status ? '...' : status}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          )}
+
+          {/* ═══════════ MENU ═══════════ */}
+          {activeTab === 'menu' && (
+            <div className="animate-slide-up">
+              <button
+                onClick={() => openModal()}
+                className="w-full bg-primary text-white py-4 rounded-2xl font-bold shadow-lg mb-6 flex justify-center items-center gap-2 btn-press"
+              >
+                <Plus size={18} strokeWidth={2.5} /> Tambah Menu Baru
+              </button>
+
+              <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 stagger-children">
+                {products.map((p) => (
+                  <div key={p.id} className="bg-surface rounded-2xl overflow-hidden shadow-sm border border-border flex flex-col relative animate-slide-up">
+                    {p.available === false && (
+                      <div className="absolute top-2 left-2 bg-danger text-white text-[8px] font-bold px-2 py-1 rounded-md z-10">HABIS</div>
+                    )}
+                    <div className={`h-24 lg:h-32 bg-surface-alt relative ${p.available === false ? 'grayscale opacity-50' : ''}`}>
+                      <img src={p.image_url || 'https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?w=400&q=75'} alt={p.name} className="w-full h-full object-cover" />
+                    </div>
+                    <div className="p-3 flex flex-col flex-1">
+                      <h3 className="text-xs font-bold text-text line-clamp-1">{p.name}</h3>
+                      <p className="text-[9px] text-text-tertiary mt-0.5">{p.category}</p>
+                      <p className="text-sm font-extrabold text-primary mt-1 mb-3">{fmtRp(p.price)}</p>
+                      <div className="flex gap-2 mt-auto">
+                        <button onClick={() => openModal(p)} className="flex-1 bg-surface-alt text-text py-1.5 rounded-lg text-[10px] font-bold border border-border btn-press inline-flex items-center justify-center gap-1">
+                          <Edit3 size={10} /> Edit
+                        </button>
+                        <button onClick={() => handleDeleteMenu(p.id)} className="flex-1 bg-danger-light text-danger py-1.5 rounded-lg text-[10px] font-bold btn-press inline-flex items-center justify-center gap-1">
+                          <Trash2 size={10} /> Hapus
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ═══════════ PROMO ═══════════ */}
+          {activeTab === 'promo' && (
+            <div className="animate-slide-up">
+              <button
+                onClick={() => openPromoModal()}
+                className="w-full bg-primary text-white py-4 rounded-2xl font-bold shadow-lg mb-6 flex justify-center items-center gap-2 btn-press"
+              >
+                <Plus size={18} strokeWidth={2.5} /> Buat Kode Promo
+              </button>
+
+              {promos.length === 0 ? (
+                <div className="text-center py-16">
+                  <Gift size={48} className="text-text-tertiary mx-auto mb-4" strokeWidth={1} />
+                  <p className="text-sm text-text-secondary font-bold">Belum ada kode promo</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {promos.map((p) => (
+                    <div key={p.id} className="bg-surface rounded-2xl p-4 border border-border shadow-sm">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="bg-primary text-white text-xs font-extrabold px-3 py-1 rounded-full">{p.code}</span>
+                          <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full ${p.is_active ? 'bg-success-light text-success' : 'bg-surface-alt text-text-tertiary'}`}>
+                            {p.is_active ? 'Aktif' : 'Nonaktif'}
+                          </span>
+                        </div>
+                        <div className="flex gap-1">
+                          <button onClick={() => openPromoModal(p)} className="w-7 h-7 rounded-lg bg-surface-alt flex items-center justify-center btn-press"><Edit3 size={12} /></button>
+                          <button onClick={() => togglePromo(p.id, p.is_active)} className="w-7 h-7 rounded-lg bg-surface-alt flex items-center justify-center btn-press text-text-secondary">
+                            {p.is_active ? <X size={12} /> : <CheckCircle2 size={12} />}
+                          </button>
+                          <button onClick={() => deletePromo(p.id)} className="w-7 h-7 rounded-lg bg-danger-light flex items-center justify-center btn-press text-danger"><Trash2 size={12} /></button>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-[10px] text-text-secondary">
+                        {p.discount_percent > 0 && <span className="bg-surface-alt px-2 py-1 rounded-lg border border-border font-bold">Diskon {p.discount_percent}%</span>}
+                        {p.discount_amount > 0 && <span className="bg-surface-alt px-2 py-1 rounded-lg border border-border font-bold">Potongan {fmtRp(p.discount_amount)}</span>}
+                        {p.min_order > 0 && <span className="bg-surface-alt px-2 py-1 rounded-lg border border-border">Min. {fmtRp(p.min_order)}</span>}
+                        <span className="bg-surface-alt px-2 py-1 rounded-lg border border-border">Terpakai: {p.usage_count || 0}/{p.max_usage}</span>
+                        {p.valid_until && <span className="bg-surface-alt px-2 py-1 rounded-lg border border-border">s/d {fmtDate(p.valid_until)}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ═══════════ REPORTS ═══════════ */}
+          {activeTab === 'reports' && (
+            <div className="animate-slide-up space-y-5">
+              {/* Filter */}
+              <div className="bg-surface rounded-3xl p-5 border border-border shadow-sm">
+                <h3 className="text-sm font-extrabold text-text mb-3 flex items-center gap-2">
+                  <Calendar size={16} className="text-primary" /> Filter Laporan
+                </h3>
+                <div className="flex gap-3 items-end">
+                  <div className="flex-1">
+                    <label className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest mb-2 block">Bulan</label>
+                    <input type="month" value={reportMonth} onChange={(e) => setReportMonth(e.target.value)}
+                      className="w-full px-4 py-3 bg-surface-alt rounded-xl border border-border text-sm font-medium text-text" />
+                  </div>
+                  <button onClick={exportExcel} className="px-4 py-3 bg-success text-white rounded-xl text-xs font-bold btn-press flex items-center gap-1.5">
+                    <Download size={14} /> Excel
+                  </button>
+                  <button onClick={exportPrint} className="px-4 py-3 bg-primary text-white rounded-xl text-xs font-bold btn-press flex items-center gap-1.5">
+                    <Printer size={14} /> Print
+                  </button>
+                </div>
+              </div>
+
+              {/* Summary */}
+              <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                <div className="bg-surface rounded-2xl p-4 border border-border">
+                  <p className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest">Total Pesanan</p>
+                  <p className="text-2xl font-extrabold text-text">{filteredOrders.length}</p>
+                </div>
+                <div className="bg-surface rounded-2xl p-4 border border-border">
+                  <p className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest">Pendapatan</p>
+                  <p className="text-2xl font-extrabold text-success">{fmtRp(filteredOrders.filter(o => o.status === 'Selesai').reduce((s, o) => s + (o.total_harga || 0), 0))}</p>
+                </div>
+                <div className="bg-surface rounded-2xl p-4 border border-border">
+                  <p className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest">Selesai</p>
+                  <p className="text-2xl font-extrabold text-text">{filteredOrders.filter(o => o.status === 'Selesai').length}</p>
+                </div>
+              </div>
+
+              {/* Table */}
+              <div className="bg-surface rounded-3xl border border-border shadow-sm overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-surface-alt border-b border-border">
+                        <th className="text-left px-4 py-3 font-bold text-text-tertiary uppercase tracking-widest text-[9px]">ID</th>
+                        <th className="text-left px-4 py-3 font-bold text-text-tertiary uppercase tracking-widest text-[9px]">Pelanggan</th>
+                        <th className="text-left px-4 py-3 font-bold text-text-tertiary uppercase tracking-widest text-[9px]">Status</th>
+                        <th className="text-right px-4 py-3 font-bold text-text-tertiary uppercase tracking-widest text-[9px]">Total</th>
+                        <th className="text-left px-4 py-3 font-bold text-text-tertiary uppercase tracking-widest text-[9px]">Tanggal</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredOrders.map((o) => (
+                        <tr key={o.id} className="border-b border-border last:border-0 hover:bg-surface-alt/50">
+                          <td className="px-4 py-3 font-mono text-text-secondary">#{o.id?.slice(0, 8)}</td>
+                          <td className="px-4 py-3 font-medium text-text">{o.nama_pelanggan || o.nama || '-'}</td>
+                          <td className="px-4 py-3"><StatusBadge status={o.status} /></td>
+                          <td className="px-4 py-3 text-right font-bold text-primary">{fmtRp(o.total_harga)}</td>
+                          <td className="px-4 py-3 text-text-secondary">{fmtDate(o.created_at)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ═══════════ SETTINGS ═══════════ */}
+          {activeTab === 'settings' && (
+            <div className="space-y-5 animate-slide-up max-w-2xl">
+              <div className="bg-surface rounded-3xl p-5 shadow-sm border border-border space-y-4">
+                <h3 className="text-sm font-extrabold text-text flex items-center gap-2"><MapPin size={16} className="text-primary" /> Alamat Toko</h3>
+                <FormField label="Alamat Lengkap Toko" type="textarea" value={storeAddress} onChange={(e) => setStoreAddress(e.target.value)} placeholder="Jl. ..." rows={3} />
+              </div>
+              <div className="bg-surface rounded-3xl p-5 shadow-sm border border-border space-y-4">
+                <h3 className="text-sm font-extrabold text-text flex items-center gap-2"><CreditCard size={16} className="text-primary" /> WhatsApp Toko</h3>
+                <FormField label="No. WhatsApp" type="tel" value={storePhone} onChange={(e) => setStorePhone(e.target.value)} placeholder="628123456789" />
+              </div>
+              <div className="bg-surface rounded-3xl p-5 shadow-sm border border-border space-y-4">
+                <h3 className="text-sm font-extrabold text-text flex items-center gap-2"><ScanLine size={16} className="text-primary" /> QRIS & Rekening</h3>
+                <div>
+                  <label className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest mb-2 block">Gambar QRIS</label>
+                  {qrisUrl && <img src={qrisUrl} alt="QRIS" className="w-32 h-32 object-contain mx-auto mb-3 rounded-xl border border-border bg-surface-alt" />}
+                  <label className="flex items-center justify-center gap-2 bg-surface-alt text-text py-3 rounded-xl font-bold text-sm cursor-pointer btn-press border border-border">
+                    <Upload size={16} className="text-text-secondary" />
+                    {qrisImage ? qrisImage.name : 'Upload Gambar QRIS'}
+                    <input type="file" accept="image/*" onChange={(e) => setQrisImage(e.target.files[0])} className="hidden" />
+                  </label>
+                </div>
+                <FormField label="Nama Bank" value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="BCA / Mandiri / BNI" />
+                <FormField label="Nomor Rekening" value={bankAccount} onChange={(e) => setBankAccount(e.target.value)} placeholder="1234567890" />
+              </div>
+              <button onClick={handleSaveSettings} className="w-full bg-primary text-white py-4 rounded-2xl font-bold shadow-lg btn-press flex items-center justify-center gap-2">
+                <CheckCircle2 size={18} /> Simpan Pengaturan
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* ═══ Proof Popup ═══ */}
+        {proofUrl && (
+          <div className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4 backdrop-blur-sm" onClick={() => setProofUrl(null)}>
+            <div className="bg-surface rounded-3xl p-4 max-w-md w-full max-h-[90vh] overflow-hidden animate-scale-in" onClick={(e) => e.stopPropagation()}>
+              <div className="flex justify-between items-center mb-3">
+                <h3 className="text-sm font-extrabold text-text">Bukti Transfer</h3>
+                <button onClick={() => setProofUrl(null)} className="w-8 h-8 bg-surface-alt rounded-full flex items-center justify-center btn-press"><X size={14} /></button>
+              </div>
+              <img src={proofUrl} alt="Bukti Transfer" className="w-full rounded-2xl object-contain max-h-[70vh]" />
+            </div>
+          </div>
+        )}
+
+        {/* ═══ Menu Modal ═══ */}
+        {modalOpen && (
+          <div className="fixed inset-0 z-[9999] bg-black/50 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
+            <div className="bg-surface w-full max-w-md rounded-3xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto animate-scale-in">
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-lg font-extrabold text-text">{form.id ? 'Edit Menu' : 'Menu Baru'}</h2>
+                <button onClick={() => setModalOpen(false)} className="w-8 h-8 bg-surface-alt rounded-full flex items-center justify-center btn-press"><X size={16} /></button>
+              </div>
+              <form onSubmit={handleSaveMenu} className="flex flex-col gap-4">
+                <FormField label="Nama Menu" value={form.name} onChange={(e) => updateForm('name', e.target.value)} placeholder="Kopi Susu J-Corners" required />
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest mb-2 block">Kategori</label>
+                    <select className="w-full px-4 py-3 bg-surface-alt rounded-xl border border-border text-sm font-medium text-text" value={form.category} onChange={(e) => updateForm('category', e.target.value)}>
+                      {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+                  <FormField label="Harga (Rp)" value={form.price} onChange={(e) => updateForm('price', fmtPrice(e.target.value))} placeholder="25.000" required />
+                </div>
+                <FormField label="Deskripsi" type="textarea" value={form.description} onChange={(e) => updateForm('description', e.target.value)} placeholder="Deskripsi menu..." rows={3} />
+                <div>
+                  <label className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest mb-2 block">Foto Menu</label>
+                  <div
+                    className={`relative border-2 border-dashed rounded-2xl p-6 text-center cursor-pointer transition-all duration-200 btn-press ${
+                      form.image ? 'border-primary bg-primary-light' : 'border-border bg-surface-alt hover:border-primary/40'
+                    }`}
+                    onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('border-primary', 'bg-primary-light') }}
+                    onDragLeave={(e) => { e.preventDefault(); e.currentTarget.classList.remove('border-primary', 'bg-primary-light') }}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      e.currentTarget.classList.remove('border-primary', 'bg-primary-light')
+                      const file = e.dataTransfer.files[0]
+                      if (file && file.type.startsWith('image/')) updateForm('image', file)
+                    }}
+                    onClick={() => document.getElementById('menu-image-input')?.click()}
+                  >
+                    {form.image ? (
+                      <div className="space-y-2">
+                        <img src={URL.createObjectURL(form.image)} alt="Preview" className="w-20 h-20 mx-auto rounded-xl object-cover" />
+                        <p className="text-xs font-bold text-primary truncate">{form.image.name}</p>
+                      </div>
+                    ) : form.existing_image ? (
+                      <div className="space-y-2">
+                        <img src={form.existing_image} alt="Current" className="w-20 h-20 mx-auto rounded-xl object-cover opacity-60" />
+                        <p className="text-[10px] text-text-tertiary">Drop gambar baru / klik untuk ganti</p>
+                      </div>
+                    ) : (
+                      <>
+                        <Upload size={24} className="text-text-tertiary mx-auto mb-2" />
+                        <p className="text-xs font-bold text-text-secondary">Drop gambar di sini</p>
+                        <p className="text-[10px] text-text-tertiary">atau klik untuk pilih file</p>
+                      </>
+                    )}
+                    <input id="menu-image-input" type="file" accept="image/*" onChange={(e) => updateForm('image', e.target.files[0])} className="hidden" />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest mb-2 block">Ketersediaan</label>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => updateForm('available', true)} className={`flex-1 py-2.5 rounded-xl text-xs font-bold btn-press border ${form.available ? 'bg-success text-white border-success' : 'bg-surface-alt text-text-tertiary border-border'}`}>✓ Tersedia</button>
+                    <button type="button" onClick={() => updateForm('available', false)} className={`flex-1 py-2.5 rounded-xl text-xs font-bold btn-press border ${!form.available ? 'bg-danger text-white border-danger' : 'bg-surface-alt text-text-tertiary border-border'}`}>✗ Habis</button>
+                  </div>
+                </div>
+                <button type="submit" disabled={saving} className="w-full bg-primary text-white py-4 rounded-xl font-bold shadow-lg mt-2 btn-press flex items-center justify-center gap-2 disabled:opacity-60">
+                  {saving ? <><Loader2 size={16} className="animate-spin" /> Menyimpan...</> : 'Simpan Menu'}
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ Promo Modal ═══ */}
+        {promoModal && (
+          <div className="fixed inset-0 z-[9999] bg-black/50 flex items-center justify-center p-4 backdrop-blur-sm animate-fade-in">
+            <div className="bg-surface w-full max-w-md rounded-3xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto animate-scale-in">
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-lg font-extrabold text-text">{promoForm.id ? 'Edit Promo' : 'Promo Baru'}</h2>
+                <button onClick={() => setPromoModal(false)} className="w-8 h-8 bg-surface-alt rounded-full flex items-center justify-center btn-press"><X size={16} /></button>
+              </div>
+              <form onSubmit={handleSavePromo} className="flex flex-col gap-4">
+                <FormField label="Kode Promo" value={promoForm.code} onChange={(e) => setPromoForm((p) => ({ ...p, code: e.target.value.toUpperCase() }))} placeholder="JUMATBERKAH" required />
+                <div className="grid grid-cols-2 gap-4">
+                  <FormField label="Diskon (%)" value={promoForm.discount_percent} onChange={(e) => setPromoForm((p) => ({ ...p, discount_percent: e.target.value }))} placeholder="10" />
+                  <FormField label="Potongan (Rp)" value={promoForm.discount_amount} onChange={(e) => setPromoForm((p) => ({ ...p, discount_amount: fmtPrice(e.target.value) }))} placeholder="5.000" />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <FormField label="Min. Order (Rp)" value={promoForm.min_order} onChange={(e) => setPromoForm((p) => ({ ...p, min_order: fmtPrice(e.target.value) }))} placeholder="25.000" />
+                  <FormField label="Max Penggunaan" value={promoForm.max_usage} onChange={(e) => setPromoForm((p) => ({ ...p, max_usage: e.target.value }))} placeholder="100" />
+                </div>
+                <FormField label="Berlaku Sampai" type="date" value={promoForm.valid_until} onChange={(e) => setPromoForm((p) => ({ ...p, valid_until: e.target.value }))} />
+                <button type="submit" className="w-full bg-primary text-white py-4 rounded-xl font-bold shadow-lg mt-2 btn-press">Simpan Promo</button>
+              </form>
+            </div>
+          </div>
+        )}
+      </main>
+    </>
+  )
+}
+
+# ------------------------------------------------
+# src/components/icons.js
+# ------------------------------------------------
+/**
+ * Centralized icon exports from Lucide React.
+ * Import all icons from this file for consistency.
+ * @see https://lucide.dev/icons
+ */
+export {
+  // Navigation
+  Home,
+  LayoutGrid,
+  ClipboardList,
+  ChevronLeft,
+  ChevronRight,
+  ArrowLeft,
+  Menu as MenuIcon,
+  
+  // Actions
+  Plus,
+  Minus,
+  X,
+  Search,
+  ShoppingBag,
+  Trash2,
+  Edit3,
+  RefreshCw,
+  ExternalLink,
+  Upload,
+  Download,
+  Eye,
+  
+  // Content
+  Clock,
+  MapPin,
+  CreditCard,
+  Truck,
+  User,
+  Lock,
+  Mail,
+  Store,
+  UtensilsCrossed,
+  Coffee,
+  Cake,
+  AlertTriangle,
+  CheckCircle2,
+  Package,
+  Link2,
+  LogOut,
+  Loader2,
+  ImageIcon,
+  ScanLine,
+  MessageSquare,
+  Sparkles,
+  Navigation2,
+  Phone,
+  Instagram,
+  Star,
+  Heart,
+  ChevronDown,
+  
+  // Analytics & Admin
+  BarChart3,
+  FileText,
+  Tag,
+  Calendar,
+  TrendingUp,
+  Users,
+  Gift,
+  Settings,
+  Printer,
+} from 'lucide-react'
+
+
+# ------------------------------------------------
+# src/components/NavBar.js
+# ------------------------------------------------
+'use client'
+
+import Link from 'next/link'
+import { usePathname } from 'next/navigation'
+import { Home, LayoutGrid, ClipboardList } from '@/components/icons'
+
+const NAV_ITEMS = [
+  { href: '/', label: 'Beranda', icon: Home },
+  { href: '/menu', label: 'Katalog', icon: LayoutGrid },
+  { href: '/history', label: 'Pesanan', icon: ClipboardList },
+]
+
+export default function NavBar() {
+  const pathname = usePathname()
+
+  /* Hide on specific routes */
+  const hiddenRoutes = ['/cart', '/admin', '/login']
+  if (hiddenRoutes.some(r => pathname.startsWith(r)) || /^\/menu\/.+/.test(pathname)) {
+    return null
+  }
+
+  return (
+    <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[1000] w-full max-w-[280px] px-4">
+      <nav className="flex items-center justify-between gradient-primary rounded-full p-1.5 shadow-xl shadow-primary-glow border border-white/10 animate-slide-up">
+        {NAV_ITEMS.map((item) => {
+          const Icon = item.icon
+          const isActive = pathname === item.href || (item.href === '/menu' && pathname.startsWith('/menu'))
+
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className="relative flex flex-col items-center justify-center w-16 h-12"
+              aria-label={item.label}
+            >
+              {isActive && (
+                <div className="absolute inset-0 bg-white rounded-full shadow-md transition-all duration-300 animate-scale-in" />
+              )}
+              <Icon
+                size={22}
+                strokeWidth={isActive ? 2.2 : 1.5}
+                className={`relative z-10 transition-colors duration-200 ${
+                  isActive ? 'text-primary' : 'text-white/60'
+                }`}
+              />
+              {!isActive && (
+                <span className="text-[8px] font-medium mt-0.5 text-white/40 relative z-10">
+                  {item.label}
+                </span>
+              )}
+            </Link>
+          )
+        })}
+      </nav>
+    </div>
+  )
+}
+
+# ------------------------------------------------
+# src/components/PageHeader.js
+# ------------------------------------------------
+'use client'
+
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { ChevronLeft, ShoppingBag } from '@/components/icons'
+
+/**
+ * Reusable sticky page header.
+ * @param {string} title - Page title
+ * @param {boolean} showBack - Show back button (default: true)
+ * @param {boolean} showCart - Show cart icon with badge
+ * @param {number} cartCount - Cart item count for badge
+ * @param {React.ReactNode} rightAction - Custom right action slot
+ * @param {function} onBack - Custom back handler
+ */
+export default function PageHeader({
+  title,
+  showBack = true,
+  showCart = false,
+  cartCount = 0,
+  rightAction,
+  onBack,
+}) {
+  const router = useRouter()
+
+  const handleBack = () => {
+    if (onBack) return onBack()
+    router.back()
+  }
+
+  return (
+    <header className="sticky top-0 z-50 glass px-5 py-4 flex items-center justify-between border-b border-border animate-slide-down">
+      {showBack ? (
+        <button
+          onClick={handleBack}
+          className="w-10 h-10 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
+          aria-label="Kembali"
+        >
+          <ChevronLeft size={18} className="text-text" />
+        </button>
+      ) : (
+        <div className="w-10" />
+      )}
+
+      <h1 className="text-[15px] font-bold text-text tracking-tight">
+        {title}
+      </h1>
+
+      {showCart ? (
+        <Link
+          href="/cart"
+          className="relative w-10 h-10 rounded-full bg-surface flex items-center justify-center shadow-sm border border-border btn-press"
+          aria-label="Keranjang"
+        >
+          <ShoppingBag size={18} className="text-text" />
+          {cartCount > 0 && (
+            <span className="absolute -top-1 -right-1 gradient-primary text-white text-[9px] font-bold w-[18px] h-[18px] rounded-full flex items-center justify-center shadow-md animate-scale-in">
+              {cartCount}
+            </span>
+          )}
+        </Link>
+      ) : rightAction ? (
+        rightAction
+      ) : (
+        <div className="w-10" />
+      )}
+    </header>
+  )
+}
+
+
+# ------------------------------------------------
+# src/components/ProductCard.js
+# ------------------------------------------------
+'use client'
+
+import { Plus } from '@/components/icons'
+
+/**
+ * Premium product card with hover effects and smooth UI.
+ * @param {object} product - Product data from Supabase
+ * @param {function} onAdd - Add to cart handler
+ */
+export default function ProductCard({ product, onAdd }) {
+  const isSoldOut = product.available === false
+
+  return (
+    <div className="bg-surface rounded-3xl shadow-sm border border-border overflow-hidden card-hover flex flex-col animate-slide-up">
+      {/* Image */}
+      <div className="relative h-36 bg-surface-alt w-full overflow-hidden">
+        <img
+          src={product.image_url || 'https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?w=400&q=75'}
+          alt={product.name}
+          className={`w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 ${
+            isSoldOut ? 'grayscale opacity-50' : ''
+          }`}
+        />
+
+        {/* Category Tag */}
+        {product.category && (
+          <div className="absolute top-3 left-3 glass px-3 py-1 rounded-full shadow-sm">
+            <span className="text-[9px] font-bold text-primary uppercase tracking-widest">
+              {product.category}
+            </span>
+          </div>
+        )}
+
+        {/* Sold Out Overlay */}
+        {isSoldOut && (
+          <div className="absolute top-3 right-3 bg-danger text-white text-[9px] font-bold px-2.5 py-1 rounded-lg shadow-md">
+            HABIS
+          </div>
+        )}
+      </div>
+
+      {/* Content */}
+      <div className="p-4 flex flex-col flex-1">
+        <h3 className="text-sm font-bold text-text line-clamp-1">{product.name}</h3>
+        <p className="text-[10px] text-text-secondary mt-1 line-clamp-2 leading-relaxed flex-1">
+          {product.description || 'Spesial J-Corners'}
+        </p>
+
+        <div className="mt-4 flex items-center justify-between">
+          <span className="text-sm font-extrabold text-primary">
+            Rp {product.price?.toLocaleString('id-ID')}
+          </span>
+          <button
+            onClick={(e) => { e.preventDefault(); onAdd(product) }}
+            disabled={isSoldOut}
+            className="gradient-primary text-white w-8 h-8 rounded-full flex items-center justify-center shadow-md shadow-primary-glow btn-press disabled:opacity-40 disabled:cursor-not-allowed"
+            aria-label={`Tambah ${product.name}`}
+          >
+            <Plus size={16} strokeWidth={3} />
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+# ------------------------------------------------
+# src/components/StatusBadge.js
+# ------------------------------------------------
+'use client'
+
+const STATUS_STYLES = {
+  Menunggu: {
+    bg: 'bg-primary-light',
+    text: 'text-primary',
+    border: 'border-primary-glow',
+    dot: 'bg-primary',
+    pulse: true,
+  },
+  Diproses: {
+    bg: 'bg-accent-light',
+    text: 'text-accent',
+    border: 'border-accent',
+    dot: 'bg-accent',
+    pulse: false,
+  },
+  Diantar: {
+    bg: 'bg-primary-light',
+    text: 'text-primary-dark',
+    border: 'border-primary-glow',
+    dot: 'bg-primary-dark',
+    pulse: false,
+  },
+  Selesai: {
+    bg: 'bg-success-light',
+    text: 'text-success',
+    border: 'border-success',
+    dot: 'bg-success',
+    pulse: false,
+  },
+}
+
+const FALLBACK = {
+  bg: 'bg-surface-alt',
+  text: 'text-text-secondary',
+  border: 'border-border',
+  dot: 'bg-text-tertiary',
+  pulse: false,
+}
+
+/**
+ * Semantic status badge with colored dot indicator.
+ * @param {string} status - Order status key
+ */
+export default function StatusBadge({ status }) {
+  const s = STATUS_STYLES[status] || FALLBACK
+
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${s.bg} ${s.text} ${s.border}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${s.dot} ${s.pulse ? 'animate-pulse' : ''}`} />
+      {status}
+    </span>
+  )
+}
+
+
+# ------------------------------------------------
+# src/components/FormField.js
+# ------------------------------------------------
+'use client'
+
+/**
+ * Consistent form field component.
+ * @param {string} label - Field label text
+ * @param {string} type - Input type (text | email | password | textarea | file)
+ * @param {string} value - Controlled value
+ * @param {function} onChange - Change handler
+ * @param {string} placeholder - Placeholder text
+ * @param {boolean} required - Required field
+ * @param {number} rows - Textarea rows (default: 2)
+ */
+export default function FormField({
+  label,
+  type = 'text',
+  value,
+  onChange,
+  placeholder,
+  required = false,
+  rows = 2,
+  accept,
+}) {
+  const baseInput = `w-full px-4 py-3 bg-surface-alt rounded-xl border border-border text-sm font-medium text-text transition-all duration-200`
+
+  return (
+    <div>
+      {label && (
+        <label className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest mb-2 block">
+          {label}
+        </label>
+      )}
+
+      {type === 'textarea' ? (
+        <textarea
+          value={value}
+          onChange={onChange}
+          placeholder={placeholder}
+          required={required}
+          rows={rows}
+          className={`${baseInput} resize-none`}
+        />
+      ) : type === 'file' ? (
+        <input
+          type="file"
+          accept={accept}
+          onChange={onChange}
+          className={`${baseInput} text-text-secondary text-xs cursor-pointer file:mr-3 file:py-1 file:px-3 file:rounded-lg file:border-0 file:bg-primary-light file:text-primary file:font-bold file:text-xs file:cursor-pointer`}
+        />
+      ) : (
+        <input
+          type={type}
+          value={value}
+          onChange={onChange}
+          placeholder={placeholder}
+          required={required}
+          className={baseInput}
+        />
+      )}
+    </div>
+  )
+}
+
+
+# ------------------------------------------------
+# src/components/EmptyState.js
+# ------------------------------------------------
+'use client'
+
+import Link from 'next/link'
+
+/**
+ * Reusable empty state component.
+ * @param {React.ReactNode} icon - Lucide icon component
+ * @param {string} title - Empty state heading
+ * @param {string} description - Optional description text
+ * @param {string} actionLabel - CTA button text
+ * @param {string} actionHref - CTA button link
+ */
+export default function EmptyState({
+  icon: Icon,
+  title,
+  description,
+  actionLabel,
+  actionHref,
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center py-20 px-6 text-center animate-fade-in">
+      <div className="w-20 h-20 rounded-full bg-surface-alt flex items-center justify-center mb-5 shadow-sm animate-float">
+        {Icon && <Icon size={36} className="text-text-tertiary" strokeWidth={1.5} />}
+      </div>
+
+      <h2 className="text-lg font-bold text-text mb-1">{title}</h2>
+
+      {description && (
+        <p className="text-sm text-text-secondary mb-6 max-w-[240px] leading-relaxed">
+          {description}
+        </p>
+      )}
+
+      {actionLabel && actionHref && (
+        <Link
+          href={actionHref}
+          className="gradient-primary text-white px-8 py-3.5 rounded-full font-bold text-sm shadow-lg shadow-primary-glow btn-press"
+        >
+          {actionLabel}
+        </Link>
+      )}
+    </div>
+  )
+}
+
+
+# ------------------------------------------------
+# src/components/LoadingSkeleton.js
+# ------------------------------------------------
+'use client'
+
+/**
+ * Skeleton block with shimmer animation.
+ * @param {string} className - Additional classes for sizing
+ */
+function Bone({ className = '' }) {
+  return <div className={`animate-shimmer rounded-2xl ${className}`} />
+}
+
+/**
+ * Grid skeleton for product cards.
+ * @param {number} count - Number of skeleton cards
+ */
+export function GridSkeleton({ count = 4 }) {
+  return (
+    <div className="grid grid-cols-2 gap-4">
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="bg-surface rounded-3xl p-3 border border-border">
+          <Bone className="w-full h-32 mb-3" />
+          <Bone className="w-3/4 h-3 mb-2" />
+          <Bone className="w-1/2 h-4" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * List skeleton for order-like items.
+ * @param {number} count - Number of skeleton rows
+ */
+export function ListSkeleton({ count = 2 }) {
+  return (
+    <div className="space-y-4">
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="bg-surface rounded-3xl p-6 border border-border">
+          <Bone className="w-1/2 h-4 mb-3" />
+          <Bone className="w-3/4 h-3 mb-2" />
+          <Bone className="w-1/3 h-3" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Full-page centered loading spinner.
+ */
+export function PageLoader() {
+  return (
+    <div className="min-h-screen bg-bg flex flex-col items-center justify-center gap-4">
+      <div className="w-10 h-10 border-[3px] border-surface-alt border-t-primary rounded-full animate-spin" />
+      <p className="text-sm font-semibold text-text-secondary animate-pulse">Memuat...</p>
+    </div>
+  )
+}
+
+
+# ------------------------------------------------
+# supabase_fix.sql
+# ------------------------------------------------
+-- ============================================================
+-- J-CORNERS SUPABASE FIX SCRIPT
+-- Jalankan ini di Supabase Dashboard → SQL Editor
+-- ============================================================
+
+-- 1. Tambah kolom 'available' ke tabel products jika belum ada
+ALTER TABLE products ADD COLUMN IF NOT EXISTS available BOOLEAN DEFAULT true;
+
+-- 2. Pastikan kolom category ada
+ALTER TABLE products ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'Food';
+
+-- 3. Pastikan kolom image_url ada
+ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;
+
+-- ============================================================
+-- RLS POLICIES untuk tabel PRODUCTS
+-- ============================================================
+
+-- Aktifkan RLS (jika belum)
+ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+
+-- Hapus policy lama jika ada (biar clean)
+DROP POLICY IF EXISTS "Products bisa dibaca siapa saja" ON products;
+DROP POLICY IF EXISTS "Hanya admin yg bisa insert" ON products;
+DROP POLICY IF EXISTS "Hanya admin yg bisa update" ON products;
+DROP POLICY IF EXISTS "Hanya admin yg bisa delete" ON products;
+DROP POLICY IF EXISTS "Allow public read products" ON products;
+DROP POLICY IF EXISTS "Allow authenticated insert products" ON products;
+DROP POLICY IF EXISTS "Allow authenticated update products" ON products;
+DROP POLICY IF EXISTS "Allow authenticated delete products" ON products;
+
+-- READ: Semua orang (anon + authenticated) bisa baca products
+CREATE POLICY "Allow public read products"
+  ON products FOR SELECT
+  USING (true);
+
+-- INSERT: Hanya authenticated user (admin yang sudah login)
+CREATE POLICY "Allow authenticated insert products"
+  ON products FOR INSERT
+  TO authenticated
+  WITH CHECK (true);
+
+-- UPDATE: Hanya authenticated user
+CREATE POLICY "Allow authenticated update products"
+  ON products FOR UPDATE
+  TO authenticated
+  USING (true)
+  WITH CHECK (true);
+
+-- DELETE: Hanya authenticated user
+CREATE POLICY "Allow authenticated delete products"
+  ON products FOR DELETE
+  TO authenticated
+  USING (true);
+
+-- ============================================================
+-- RLS POLICIES untuk tabel ORDERS
+-- ============================================================
+
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+
+-- Hapus policy lama
+DROP POLICY IF EXISTS "Allow public read orders" ON orders;
+DROP POLICY IF EXISTS "Allow public insert orders" ON orders;
+DROP POLICY IF EXISTS "Allow authenticated update orders" ON orders;
+DROP POLICY IF EXISTS "Allow authenticated read all orders" ON orders;
+
+-- READ orders: anon bisa baca (untuk halaman history user)
+CREATE POLICY "Allow public read orders"
+  ON orders FOR SELECT
+  USING (true);
+
+-- INSERT orders: semua orang bisa buat pesanan (termasuk user yg tidak login)
+CREATE POLICY "Allow public insert orders"
+  ON orders FOR INSERT
+  WITH CHECK (true);
+
+-- UPDATE orders: hanya authenticated (admin update status)
+CREATE POLICY "Allow authenticated update orders"
+  ON orders FOR UPDATE
+  TO authenticated
+  USING (true)
+  WITH CHECK (true);
+
+-- ============================================================
+-- Storage bucket policies (jika menggunakan upload gambar)
+-- ============================================================
+
+-- Pastikan bucket 'product-images' ada dan PUBLIC
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('product-images', 'product-images', true)
+ON CONFLICT (id) DO UPDATE SET public = true;
+
+-- Pastikan bucket 'bukti-transfer' ada
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('bukti-transfer', 'bukti-transfer', true)
+ON CONFLICT (id) DO UPDATE SET public = true;
+
+-- Policy storage: semua bisa upload ke product-images
+DROP POLICY IF EXISTS "Allow authenticated upload product images" ON storage.objects;
+DROP POLICY IF EXISTS "Allow public read product images" ON storage.objects;
+DROP POLICY IF EXISTS "Allow authenticated upload bukti" ON storage.objects;
+DROP POLICY IF EXISTS "Allow public read bukti" ON storage.objects;
+
+CREATE POLICY "Allow authenticated upload product images"
+  ON storage.objects FOR INSERT
+  TO authenticated
+  WITH CHECK (bucket_id = 'product-images');
+
+CREATE POLICY "Allow public read product images"
+  ON storage.objects FOR SELECT
+  USING (bucket_id = 'product-images');
+
+CREATE POLICY "Allow public upload bukti"
+  ON storage.objects FOR INSERT
+  WITH CHECK (bucket_id = 'bukti-transfer');
+
+CREATE POLICY "Allow public read bukti"
+  ON storage.objects FOR SELECT
+  USING (bucket_id = 'bukti-transfer');
+
+-- ============================================================
+-- VERIFIKASI: Cek kolom products
+-- ============================================================
+SELECT column_name, data_type, column_default
+FROM information_schema.columns
+WHERE table_name = 'products'
+ORDER BY ordinal_position;
+
+
+# ------------------------------------------------
+# supabase_upgrade.sql
+# ------------------------------------------------
+-- ============================================================
+-- J-CORNERS UPGRADE — REVIEWS, PROMO CODES, REALTIME
+-- Jalankan di Supabase Dashboard → SQL Editor
+-- ============================================================
+
+-- 1. REVIEWS TABLE
+CREATE TABLE IF NOT EXISTS reviews (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  order_id UUID REFERENCES orders(id) ON DELETE CASCADE,
+  rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+  comment TEXT DEFAULT '',
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+ALTER TABLE reviews ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow public insert reviews" ON reviews;
+DROP POLICY IF EXISTS "Allow public read reviews" ON reviews;
+
+CREATE POLICY "Allow public insert reviews"
+  ON reviews FOR INSERT
+  WITH CHECK (true);
+
+CREATE POLICY "Allow public read reviews"
+  ON reviews FOR SELECT
+  USING (true);
+
+-- 2. PROMO CODES TABLE
+CREATE TABLE IF NOT EXISTS promo_codes (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  code TEXT NOT NULL UNIQUE,
+  discount_percent INTEGER DEFAULT 0,
+  discount_amount INTEGER DEFAULT 0,
+  min_order INTEGER DEFAULT 0,
+  valid_until TIMESTAMPTZ,
+  is_active BOOLEAN DEFAULT true,
+  usage_count INTEGER DEFAULT 0,
+  max_usage INTEGER DEFAULT 100,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+ALTER TABLE promo_codes ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow public read promo_codes" ON promo_codes;
+DROP POLICY IF EXISTS "Allow authenticated write promo_codes" ON promo_codes;
+DROP POLICY IF EXISTS "Allow authenticated update promo_codes" ON promo_codes;
+DROP POLICY IF EXISTS "Allow authenticated delete promo_codes" ON promo_codes;
+DROP POLICY IF EXISTS "Allow public update promo usage" ON promo_codes;
+
+CREATE POLICY "Allow public read promo_codes"
+  ON promo_codes FOR SELECT
+  USING (true);
+
+CREATE POLICY "Allow authenticated write promo_codes"
+  ON promo_codes FOR INSERT
+  TO authenticated
+  WITH CHECK (true);
+
+CREATE POLICY "Allow authenticated update promo_codes"
+  ON promo_codes FOR UPDATE
+  TO authenticated
+  USING (true)
+  WITH CHECK (true);
+
+CREATE POLICY "Allow authenticated delete promo_codes"
+  ON promo_codes FOR DELETE
+  TO authenticated
+  USING (true);
+
+-- Allow anon to increment usage_count
+CREATE POLICY "Allow public update promo usage"
+  ON promo_codes FOR UPDATE
+  USING (true)
+  WITH CHECK (true);
+
+-- 3. ENABLE REALTIME on orders table
+ALTER PUBLICATION supabase_realtime ADD TABLE orders;
+
+-- 4. Add nama_pelanggan to orders if missing (for reviews display)
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS nama_pelanggan TEXT;
+
+-- DONE
+SELECT 'Migration complete!' AS status;
+
+

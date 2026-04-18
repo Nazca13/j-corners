@@ -11,7 +11,7 @@ import FormField from '@/components/FormField'
 import {
   ShoppingBag, User, Truck, Plus, Minus, X,
   CreditCard, ScanLine, Loader2, CheckCircle2,
-  MapPin, Upload,
+  MapPin, Upload, Tag,
 } from '@/components/icons'
 
 /* Alamat toko default — admin bisa update di dashboard */
@@ -47,6 +47,12 @@ export default function CartPage() {
   const [bankAccount, setBankAccount] = useState('')
   const [bankName, setBankName] = useState('')
 
+  /* Promo */
+  const [promoCode, setPromoCode] = useState('')
+  const [promoApplied, setPromoApplied] = useState(null)
+  const [promoLoading, setPromoLoading] = useState(false)
+  const [promoError, setPromoError] = useState('')
+
   useEffect(() => {
     setCart(getLSJSON('cart', []))
 
@@ -78,7 +84,56 @@ export default function CartPage() {
   const subtotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0)
   const ongkir = getOngkir(subtotal, type)
   const adminFee = payment === 'qris' ? ADMIN_FEE : 0
-  const total = subtotal + ongkir + adminFee
+
+  /* Promo discount calculation */
+  let discount = 0
+  if (promoApplied) {
+    if (promoApplied.discount_percent > 0) {
+      discount = Math.floor(subtotal * promoApplied.discount_percent / 100)
+    }
+    if (promoApplied.discount_amount > 0) {
+      discount += promoApplied.discount_amount
+    }
+  }
+  const total = Math.max(0, subtotal + ongkir + adminFee - discount)
+
+  /* ─── Apply Promo ─── */
+  const applyPromo = async () => {
+    if (!promoCode.trim()) return
+    setPromoLoading(true)
+    setPromoError('')
+
+    const { data, error } = await supabase
+      .from('promo_codes')
+      .select('*')
+      .eq('code', promoCode.toUpperCase())
+      .eq('is_active', true)
+      .single()
+
+    if (error || !data) {
+      setPromoError('Kode promo tidak ditemukan atau tidak aktif')
+      setPromoApplied(null)
+    } else if (data.min_order > 0 && subtotal < data.min_order) {
+      setPromoError(`Min. order ${data.min_order.toLocaleString('id-ID')} untuk promo ini`)
+      setPromoApplied(null)
+    } else if (data.max_usage > 0 && data.usage_count >= data.max_usage) {
+      setPromoError('Kuota promo sudah habis')
+      setPromoApplied(null)
+    } else if (data.valid_until && new Date(data.valid_until) < new Date()) {
+      setPromoError('Promo sudah expired')
+      setPromoApplied(null)
+    } else {
+      setPromoApplied(data)
+      setPromoError('')
+    }
+    setPromoLoading(false)
+  }
+
+  const removePromo = () => {
+    setPromoApplied(null)
+    setPromoCode('')
+    setPromoError('')
+  }
 
   /* ─── Show Toast ─── */
   const showToast = (message) => {
@@ -111,13 +166,16 @@ export default function CartPage() {
       const { data: orderData, error: orderError } = await supabase
         .from('orders')
         .insert([{
-          nama_pembeli: nama,
+          nama_pelanggan: nama,
+          nama: nama,
           no_hp: noHp,
           alamat: type === 'delivery' ? alamat : 'Pickup',
           total_harga: total,
           metode_bayar: payment,
           bukti_transfer: buktiUrl,
-          items: cart,
+          items: cart.map((i) => ({ id: i.id, name: i.name, quantity: i.quantity, price: i.price })),
+          promo_code: promoApplied?.code || null,
+          discount: discount || 0,
         }])
         .select()
 
@@ -126,6 +184,11 @@ export default function CartPage() {
         showToast('❌ Gagal memesan! Coba lagi.')
         setLoading(false)
         return
+      }
+
+      /* Increment promo usage */
+      if (promoApplied) {
+        await supabase.from('promo_codes').update({ usage_count: (promoApplied.usage_count || 0) + 1 }).eq('id', promoApplied.id)
       }
 
       /* Save order ID locally */
@@ -335,6 +398,51 @@ export default function CartPage() {
         ))}
       </div>
 
+      {/* ─── Promo Code ─── */}
+      <div className="px-5 mb-5 animate-slide-up" style={{ animationDelay: '100ms' }}>
+        <div className="bg-surface rounded-3xl p-4 shadow-sm border border-border">
+          <label className="text-[10px] font-bold text-text-tertiary uppercase tracking-widest mb-2 block flex items-center gap-1.5">
+            <Tag size={12} /> Kode Promo
+          </label>
+          {promoApplied ? (
+            <div className="flex items-center gap-2 bg-success-light p-3 rounded-xl border border-success/20">
+              <CheckCircle2 size={16} className="text-success shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-bold text-success">{promoApplied.code}</p>
+                <p className="text-[10px] text-text-secondary">
+                  {promoApplied.discount_percent > 0 && `Diskon ${promoApplied.discount_percent}%`}
+                  {promoApplied.discount_percent > 0 && promoApplied.discount_amount > 0 && ' + '}
+                  {promoApplied.discount_amount > 0 && `Potongan Rp ${promoApplied.discount_amount.toLocaleString('id-ID')}`}
+                </p>
+              </div>
+              <button onClick={removePromo} className="w-7 h-7 bg-surface rounded-lg flex items-center justify-center btn-press">
+                <X size={12} className="text-text-secondary" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={promoCode}
+                onChange={(e) => setPromoCode(e.target.value.toUpperCase())}
+                placeholder="Masukkan kode..."
+                className="flex-1 px-4 py-3 bg-surface-alt rounded-xl border border-border text-sm font-bold text-text uppercase"
+              />
+              <button
+                onClick={applyPromo}
+                disabled={promoLoading}
+                className="px-4 py-3 bg-primary text-white rounded-xl text-xs font-bold btn-press disabled:opacity-60"
+              >
+                {promoLoading ? '...' : 'Pakai'}
+              </button>
+            </div>
+          )}
+          {promoError && (
+            <p className="text-[10px] text-danger font-bold mt-2">{promoError}</p>
+          )}
+        </div>
+      </div>
+
       {/* ─── Payment Section ─── */}
       <div className="px-5 mb-5 animate-slide-up" style={{ animationDelay: '120ms' }}>
         <div className="bg-surface rounded-3xl p-5 shadow-sm border border-border">
@@ -361,6 +469,12 @@ export default function CartPage() {
               <div className="flex justify-between text-sm">
                 <span className="text-text-secondary font-medium">Biaya Admin</span>
                 <span className="text-text font-bold">Rp {ADMIN_FEE.toLocaleString('id-ID')}</span>
+              </div>
+            )}
+            {discount > 0 && (
+              <div className="flex justify-between text-sm">
+                <span className="text-success font-bold">Diskon ({promoApplied?.code})</span>
+                <span className="text-success font-bold">-Rp {discount.toLocaleString('id-ID')}</span>
               </div>
             )}
           </div>
