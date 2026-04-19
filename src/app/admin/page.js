@@ -600,17 +600,35 @@ export default function AdminPage() {
                           </button>
                         )}
 
-                        {/* Status update */}
+                        {/* Status update — forward only */}
                         <div className="pt-3 border-t border-dashed border-border">
                           <p className="text-[9px] font-bold text-text-tertiary mb-2 uppercase tracking-widest">Update Status</p>
-                          <div className="flex gap-1.5 overflow-x-auto scrollbar-hide">
-                            {STATUS_FLOW.map((status) => (
-                              <button key={status} onClick={() => updateStatus(order.id, status)} disabled={isUpdating}
-                                className={`shrink-0 px-3 py-1.5 rounded-xl text-[10px] font-bold transition-all btn-press ${order.status === status ? 'bg-primary text-white shadow-md' : 'bg-surface-alt text-text-tertiary border border-border'}`}>
-                                {isUpdating && order.status === status ? '...' : status}
-                              </button>
-                            ))}
-                          </div>
+                          {order.status === 'Selesai' ? (
+                            <p className="text-[10px] font-bold text-success bg-success-light px-3 py-2 rounded-xl text-center">✓ Pesanan selesai</p>
+                          ) : (
+                            <div className="flex gap-1.5 overflow-x-auto scrollbar-hide">
+                              {STATUS_FLOW.map((status) => {
+                                const currentIdx = STATUS_FLOW.indexOf(order.status)
+                                const statusIdx = STATUS_FLOW.indexOf(status)
+                                const isCurrent = status === order.status
+                                const isPast = statusIdx < currentIdx
+                                const isNext = statusIdx === currentIdx + 1
+                                return (
+                                  <button key={status}
+                                    onClick={() => isNext && updateStatus(order.id, status)}
+                                    disabled={isUpdating || !isNext}
+                                    className={`shrink-0 px-3 py-1.5 rounded-xl text-[10px] font-bold transition-all ${
+                                      isCurrent ? 'bg-primary text-white shadow-md' 
+                                      : isNext ? 'bg-success text-white shadow-md btn-press animate-pulse'
+                                      : isPast ? 'bg-surface-alt text-text-tertiary/40 border border-border/50 line-through'
+                                      : 'bg-surface-alt text-text-tertiary border border-border opacity-50'
+                                    }`}>
+                                    {isUpdating && isNext ? '...' : status}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )

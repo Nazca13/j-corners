@@ -477,20 +477,24 @@ export default function CartPage() {
               </button>
             </div>
           ) : (
-            <div className="flex gap-2">
+            <div className="flex gap-2 items-stretch">
               <input
                 type="text"
                 value={promoCode}
                 onChange={(e) => setPromoCode(e.target.value.toUpperCase())}
-                placeholder="Masukkan kode..."
-                className="flex-1 px-4 py-3 bg-surface-alt rounded-xl border border-border text-sm font-bold text-text uppercase"
+                placeholder="KODE VOUCHER"
+                className="flex-1 min-w-0 px-4 py-3 bg-surface-alt rounded-xl border border-border text-sm font-bold text-text uppercase tracking-wider"
               />
               <button
                 onClick={applyPromo}
-                disabled={promoLoading}
-                className="px-4 py-3 bg-primary text-white rounded-xl text-xs font-bold btn-press disabled:opacity-60"
+                disabled={promoLoading || !promoCode.trim()}
+                className="shrink-0 px-5 py-3 bg-primary text-white rounded-xl text-xs font-bold btn-press disabled:opacity-40 flex items-center gap-1.5 shadow-md"
               >
-                {promoLoading ? '...' : 'Pakai'}
+                {promoLoading ? (
+                  <><Loader2 size={14} className="animate-spin" /> Cek...</>
+                ) : (
+                  <><Tag size={14} /> Gunakan</>
+                )}
               </button>
             </div>
           )}
