@@ -471,7 +471,7 @@ export default function AdminPage() {
           <button onClick={fetchAll} className="w-10 h-10 bg-surface-alt rounded-full flex items-center justify-center text-primary btn-press"><RefreshCw size={18} /></button>
         </header>
 
-        <div className="p-4 lg:p-6 max-w-[1400px]">
+        <div className="w-full p-4 lg:p-8 max-w-[1400px] mx-auto">
 
           {/* ═══ DASHBOARD ═══ */}
           {activeTab === 'dashboard' && (

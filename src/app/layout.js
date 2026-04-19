@@ -1,6 +1,7 @@
 import "./globals.css";
 import { Poppins } from "next/font/google";
 import NavBar from "@/components/NavBar";
+import LayoutShell from "@/components/LayoutShell";
 
 const poppins = Poppins({
   subsets: ["latin"],
@@ -26,12 +27,10 @@ export const metadata = {
 export default function RootLayout({ children }) {
   return (
     <html lang="id" data-scroll-behavior="smooth" suppressHydrationWarning>
-      <body className={`${poppins.variable} bg-[#E8E6E3] flex justify-center`} suppressHydrationWarning>
-        {/* Mobile App Shell */}
-        <div className="w-full max-w-md min-h-screen bg-bg relative shadow-2xl overflow-x-hidden border-x border-border">
+      <body className={`${poppins.variable} bg-[#E8E6E3]`} suppressHydrationWarning>
+        <LayoutShell>
           {children}
-          <NavBar />
-        </div>
+        </LayoutShell>
       </body>
     </html>
   );
