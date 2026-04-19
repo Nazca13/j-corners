@@ -4,7 +4,8 @@ import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { getLS, getLSJSON, setLSJSON, removeLS } from '@/lib/storage'
+import { getLSJSON, setLSJSON, removeLS } from '@/lib/storage'
+import { getStoreSettings } from '@/lib/settings'
 import PageHeader from '@/components/PageHeader'
 import EmptyState from '@/components/EmptyState'
 import FormField from '@/components/FormField'
@@ -78,13 +79,13 @@ export default function CartPage() {
     }
     validateCart()
 
-    /* Load store settings from localStorage (set by admin) */
-    const savedAddr = getLS('store_address')
-    if (savedAddr) setStoreAddress(savedAddr)
-    const savedWa = getLS('store_phone')
-    if (savedWa) setStoreWa(savedWa)
-    setQrisUrl(getLS('store_qris_url', ''))
-    setBankAccounts(getLSJSON('store_banks', []))
+    /* Load store settings from Supabase */
+    getStoreSettings().then((s) => {
+      if (s.address) setStoreAddress(s.address)
+      if (s.phone) setStoreWa(s.phone)
+      setQrisUrl(s.qris_url || '')
+      setBankAccounts(Array.isArray(s.bank_accounts) && s.bank_accounts.length > 0 ? s.bank_accounts : [{ bank: '', account: '' }])
+    })
   }, [])
 
   /* ─── Address Autocomplete (Nominatim) ─── */

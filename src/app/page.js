@@ -4,9 +4,11 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
+import { getStoreSettings, STORE_DEFAULTS } from '@/lib/settings'
 import {
   Clock, ShoppingBag, Store, Coffee, Cake, UtensilsCrossed, Sparkles,
   MapPin, Navigation2, Phone, Star, Heart, Truck, CheckCircle2, RefreshCw,
+  CupSoda, Tag
 } from '@/components/icons'
 import { GridSkeleton } from '@/components/LoadingSkeleton'
 import { getLSJSON, getLS } from '@/lib/storage'
@@ -77,10 +79,10 @@ function HeroCarousel() {
 
 /* ─── Static Data ─── */
 const CATEGORIES = [
-  { name: 'Food', icon: Store },
+  { name: 'Food', icon: UtensilsCrossed },
   { name: 'Coffee', icon: Coffee },
   { name: 'Bakery', icon: Cake },
-  { name: 'Non Coffee', icon: UtensilsCrossed },
+  { name: 'Non Coffee', icon: CupSoda },
 ]
 
 const FEATURES = [
@@ -112,19 +114,7 @@ const FALLBACK_REVIEWS = [
   { comment: 'Harga terjangkau, rasa ga murahan 👍', rating: 4 },
 ]
 
-/* ─── Store Info (from admin settings via localStorage) ─── */
-const STORE_DEFAULTS = {
-  address: 'Jl. Telekomunikasi No. 1, Sukapura, Dayeuhkolot, Bandung, Jawa Barat 40257',
-  phone: '6285137610502',
-  lat: -6.9733,
-  lng: 107.6307,
-}
-
-const OPERATING_HOURS = [
-  { day: 'Senin - Jumat', time: '08.00 - 17.00' },
-  { day: 'Sabtu', time: '08.00 - 15.00' },
-  { day: 'Minggu', time: 'Tutup' },
-]
+/* ─── Store Info — fetched from Supabase via settings lib ─── */
 
 /* ─── Component ─── */
 export default function HomePage() {
@@ -135,10 +125,14 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true)
   const [storeAddress, setStoreAddress] = useState(STORE_DEFAULTS.address)
   const [storePhone, setStorePhone] = useState(STORE_DEFAULTS.phone)
+  const [storeLat, setStoreLat] = useState(STORE_DEFAULTS.lat)
+  const [storeLng, setStoreLng] = useState(STORE_DEFAULTS.lng)
+  const [operatingHours, setOperatingHours] = useState('08:00 - 22:00')
+  const [alertMessage, setAlertMessage] = useState('')
   const [reviews, setReviews] = useState([])
 
   useEffect(() => {
-    /* One-time alert */
+    /* One-time welcome alert */
     try {
       if (!sessionStorage.getItem('jcAlert')) {
         setTimeout(() => {
@@ -146,22 +140,25 @@ export default function HomePage() {
           sessionStorage.setItem('jcAlert', '1')
         }, 900)
       }
-    } catch { /* incognito */ }
+    } catch (_e) { /* incognito */ }
 
     /* Cart count */
     const cart = getLSJSON('cart', [])
     setCartCount(cart.reduce((sum, item) => sum + (item.quantity || 1), 0))
 
-    /* Store settings from admin */
-    setStoreAddress(getLS('store_address', STORE_DEFAULTS.address))
-    setStorePhone(getLS('store_phone', STORE_DEFAULTS.phone))
-
-    /* Popular products + reviews */
+    /* Fetch store settings from Supabase + products + reviews */
     const fetchData = async () => {
-      const [{ data: prodData }, { data: revData }] = await Promise.all([
+      const [settings, { data: prodData }, { data: revData }] = await Promise.all([
+        getStoreSettings(),
         supabase.from('products').select('*').limit(4),
         supabase.from('reviews').select('*').gte('rating', 4).order('created_at', { ascending: false }).limit(10),
       ])
+      setStoreAddress(settings.address || STORE_DEFAULTS.address)
+      setStorePhone(settings.phone || STORE_DEFAULTS.phone)
+      setStoreLat(settings.lat || STORE_DEFAULTS.lat)
+      setStoreLng(settings.lng || STORE_DEFAULTS.lng)
+      setOperatingHours(settings.operating_hours || '08:00 - 22:00')
+      setAlertMessage(settings.alert_message || '')
       setPopular(prodData || [])
       setReviews(revData && revData.length > 0 ? revData : FALLBACK_REVIEWS)
       setLoading(false)
@@ -186,7 +183,7 @@ export default function HomePage() {
   }
 
   const waLink = `https://wa.me/${storePhone}`
-  const mapsSearchUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(storeAddress)}`
+  const mapsSearchUrl = `https://www.google.com/maps/search/?api=1&query=${storeLat},${storeLng}`
 
   return (
     <>
@@ -250,6 +247,16 @@ export default function HomePage() {
 
       {/* ─── Hero Carousel ─── */}
       <HeroCarousel />
+
+      {/* ─── Dynamic Alert Banner ─── */}
+      {alertMessage && (
+        <div className="px-5 mb-6 animate-slide-down">
+          <div className="bg-primary-light border border-primary text-primary px-4 py-3 rounded-2xl flex items-start gap-3 shadow-sm">
+            <Tag size={18} className="shrink-0 mt-0.5" />
+            <p className="text-xs font-semibold leading-relaxed">{alertMessage}</p>
+          </div>
+        </div>
+      )}
 
       {/* ─── Info Banner ─── */}
       <div className="px-5 mt-4 mb-6 animate-slide-up">
@@ -343,7 +350,7 @@ export default function HomePage() {
           <div className="w-full h-48 bg-surface-alt relative overflow-hidden">
             <iframe
               title="Lokasi J-Corners"
-              src={`https://maps.google.com/maps?q=${encodeURIComponent(storeAddress)}&t=&z=15&ie=UTF8&iwloc=&output=embed`}
+              src={`https://maps.google.com/maps?q=${storeLat},${storeLng}&t=&z=15&ie=UTF8&iwloc=&output=embed`}
               className="w-full h-full border-0"
               loading="lazy"
               referrerPolicy="no-referrer-when-downgrade"
@@ -388,22 +395,9 @@ export default function HomePage() {
         </div>
 
         <div className="bg-surface rounded-3xl p-4 shadow-sm border border-border">
-          <div className="space-y-2.5">
-            {OPERATING_HOURS.map((item) => (
-              <div
-                key={item.day}
-                className="flex justify-between items-center"
-              >
-                <span className="text-xs font-semibold text-text">{item.day}</span>
-                <span className={`text-xs font-bold px-3 py-1 rounded-lg ${
-                  item.time === 'Tutup'
-                    ? 'bg-danger-light text-danger'
-                    : 'bg-primary-light text-primary'
-                }`}>
-                  {item.time}
-                </span>
-              </div>
-            ))}
+          <div className="flex justify-between items-center">
+            <span className="text-xs font-semibold text-text">Setiap Hari</span>
+            <span className="text-xs font-bold px-3 py-1 rounded-lg bg-primary-light text-primary">{operatingHours}</span>
           </div>
         </div>
       </div>

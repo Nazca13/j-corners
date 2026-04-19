@@ -40,6 +40,8 @@ export {
   UtensilsCrossed,
   Coffee,
   Cake,
+  CupSoda,
+  Wine,
   AlertTriangle,
   CheckCircle2,
   Package,

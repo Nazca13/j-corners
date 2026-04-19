@@ -3,7 +3,8 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { getLS, setLS, getLSJSON, setLSJSON } from '@/lib/storage'
+import { getLSJSON, setLSJSON } from '@/lib/storage'
+import { getStoreSettings, saveStoreSettings } from '@/lib/settings'
 import StatusBadge from '@/components/StatusBadge'
 import FormField from '@/components/FormField'
 import { PageLoader } from '@/components/LoadingSkeleton'
@@ -96,7 +97,12 @@ export default function AdminPage() {
   const [qrisImage, setQrisImage] = useState(null)
   const [qrisUrl, setQrisUrl] = useState('')
   const [bankAccounts, setBankAccounts] = useState([{ bank: '', account: '' }])
+  const [operatingHours, setOperatingHours] = useState('08:00 - 22:00')
+  const [alertMessage, setAlertMessage] = useState('')
+  const [storeLat, setStoreLat] = useState(-6.9733)
+  const [storeLng, setStoreLng] = useState(107.6307)
   const [settingsSaved, setSettingsSaved] = useState(false)
+  const [settingsLoading, setSettingsLoading] = useState(false)
 
   /* Report filter */
   const [reportMonth, setReportMonth] = useState(() => {
@@ -132,10 +138,17 @@ export default function AdminPage() {
 
   useEffect(() => {
     fetchAll()
-    setStoreAddress(getLS('store_address', 'Jl. Telekomunikasi No. 1, Sukapura, Dayeuhkolot, Bandung, Jawa Barat 40257'))
-    setStorePhone(getLS('store_phone', '6285137610502'))
-    setQrisUrl(getLS('store_qris_url', ''))
-    setBankAccounts(getLSJSON('store_banks', [{ bank: '', account: '' }]))
+    // Load settings from Supabase
+    getStoreSettings().then((s) => {
+      setStoreAddress(s.address || '')
+      setStorePhone(s.phone || '')
+      setQrisUrl(s.qris_url || '')
+      setBankAccounts(Array.isArray(s.bank_accounts) && s.bank_accounts.length > 0 ? s.bank_accounts : [{ bank: '', account: '' }])
+      setOperatingHours(s.operating_hours || '08:00 - 22:00')
+      setAlertMessage(s.alert_message || '')
+      setStoreLat(s.lat || -6.9733)
+      setStoreLng(s.lng || 107.6307)
+    })
   }, [fetchAll])
 
   /* ─── Realtime: new orders ─── */
@@ -329,15 +342,25 @@ export default function AdminPage() {
 
   /* ─── Settings ─── */
   const handleSaveSettings = async () => {
-    setLS('store_address', storeAddress)
-    setLS('store_phone', storePhone)
-    setLSJSON('store_banks', bankAccounts.filter((b) => b.bank || b.account))
+    setSettingsLoading(true)
+    let finalQrisUrl = qrisUrl
     if (qrisImage) {
       const fname = `qris_${Date.now()}.${qrisImage.name.split('.').pop()}`
       const { error } = await supabase.storage.from('product-images').upload(fname, qrisImage)
-      if (!error) { const url = supabase.storage.from('product-images').getPublicUrl(fname).data.publicUrl; setQrisUrl(url); setLS('store_qris_url', url) }
+      if (!error) { finalQrisUrl = supabase.storage.from('product-images').getPublicUrl(fname).data.publicUrl; setQrisUrl(finalQrisUrl) }
     }
-    setSettingsSaved(true); setTimeout(() => setSettingsSaved(false), 2000)
+    const { error } = await saveStoreSettings({
+      address: storeAddress,
+      phone: storePhone,
+      qris_url: finalQrisUrl,
+      bank_accounts: bankAccounts.filter((b) => b.bank || b.account),
+      operating_hours: operatingHours,
+      alert_message: alertMessage,
+      lat: storeLat,
+      lng: storeLng,
+    })
+    setSettingsLoading(false)
+    if (!error) { setSettingsSaved(true); setTimeout(() => setSettingsSaved(false), 2000) }
   }
   const handleLogout = async () => { await supabase.auth.signOut(); router.replace('/login') }
 
@@ -350,8 +373,24 @@ export default function AdminPage() {
   const filteredOrders = orders.filter((o) => { const d = new Date(o.created_at); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` === reportMonth })
   const exportExcel = async () => {
     const XLSX = (await import('xlsx')).default || await import('xlsx')
-    const rows = filteredOrders.map((o) => ({ ID: o.id?.slice(0, 8).toUpperCase(), Pelanggan: o.nama_pembeli || '-', Status: o.status, Total: o.total_harga || 0, Metode: o.metode_bayar || '-', Tanggal: fmtDate(o.created_at) }))
-    const ws = XLSX.utils.json_to_sheet(rows); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Laporan'); XLSX.writeFile(wb, `laporan_jcorners_${reportMonth}.xlsx`)
+    const rows = filteredOrders.map((o) => ({
+      'ID Pesanan': o.id?.slice(0, 8).toUpperCase(),
+      'Pelanggan': o.nama_pembeli || '-',
+      'No HP': o.no_hp || '-',
+      'Alamat': o.alamat || '-',
+      'Items': o.items?.map((i) => `${i.name} x${i.quantity}`).join(', ') || '-',
+      'Status': o.status,
+      'Total (Rp)': o.total_harga || 0,
+      'Metode Bayar': o.metode_bayar || '-',
+      'Tanggal': fmtDate(o.created_at),
+      'Jam': fmtTime(o.created_at),
+    }))
+    const ws = XLSX.utils.json_to_sheet(rows)
+    // Auto-size columns
+    ws['!cols'] = Object.keys(rows[0] || {}).map((k) => ({ wch: Math.max(k.length, 15) }))
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Laporan Pesanan')
+    XLSX.writeFile(wb, `laporan_jcorners_${reportMonth}.xlsx`)
   }
 
   /* ─── Loading ─── */
@@ -736,6 +775,7 @@ export default function AdminPage() {
                       <th className="text-left px-4 py-3 font-bold text-text-tertiary uppercase text-[9px]">Status</th>
                       <th className="text-right px-4 py-3 font-bold text-text-tertiary uppercase text-[9px]">Total</th>
                       <th className="text-left px-4 py-3 font-bold text-text-tertiary uppercase text-[9px]">Tanggal</th>
+                      <th className="text-left px-4 py-3 font-bold text-text-tertiary uppercase text-[9px]">Jam</th>
                     </tr></thead>
                     <tbody>{filteredOrders.map((o) => (
                       <tr key={o.id} className="border-b border-border last:border-0 hover:bg-surface-alt/50">
@@ -744,6 +784,7 @@ export default function AdminPage() {
                         <td className="px-4 py-3"><StatusBadge status={o.status} /></td>
                         <td className="px-4 py-3 text-right font-bold text-primary">{fmtRp(o.total_harga)}</td>
                         <td className="px-4 py-3 text-text-secondary">{fmtDate(o.created_at)}</td>
+                        <td className="px-4 py-3 text-text-secondary font-mono">{fmtTime(o.created_at)}</td>
                       </tr>
                     ))}</tbody>
                   </table>
@@ -796,7 +837,33 @@ export default function AdminPage() {
                 </div>
               </div>
 
-              <button onClick={handleSaveSettings} className="w-full bg-primary text-white py-4 rounded-2xl font-bold shadow-lg btn-press flex items-center justify-center gap-2"><CheckCircle2 size={18} /> Simpan Pengaturan</button>
+              {/* Operating Hours */}
+              <div className="bg-surface rounded-3xl p-5 shadow-sm border border-border space-y-4">
+                <h3 className="text-sm font-extrabold text-text flex items-center gap-2"><Clock size={16} className="text-primary" /> Jam Operasional</h3>
+                <FormField label="Jam Buka - Tutup" value={operatingHours} onChange={(e) => setOperatingHours(e.target.value)} placeholder="08:00 - 22:00" />
+              </div>
+
+              {/* Alert / Pemberitahuan */}
+              <div className="bg-surface rounded-3xl p-5 shadow-sm border border-border space-y-4">
+                <h3 className="text-sm font-extrabold text-text flex items-center gap-2"><Tag size={16} className="text-primary" /> Pemberitahuan / Alert</h3>
+                <FormField label="Pesan Alert (kosongkan jika tidak ada)" type="textarea" value={alertMessage} onChange={(e) => setAlertMessage(e.target.value)} placeholder="Contoh: Hari ini tutup lebih awal jam 20:00" rows={2} />
+                <p className="text-[10px] text-text-tertiary">Pesan ini akan tampil di halaman utama user sebagai banner.</p>
+              </div>
+
+              {/* Koordinat Maps */}
+              <div className="bg-surface rounded-3xl p-5 shadow-sm border border-border space-y-4">
+                <h3 className="text-sm font-extrabold text-text flex items-center gap-2"><Navigation2 size={16} className="text-primary" /> Koordinat Lokasi (Google Maps)</h3>
+                <div className="grid grid-cols-2 gap-3">
+                  <FormField label="Latitude" value={storeLat} onChange={(e) => setStoreLat(parseFloat(e.target.value) || 0)} placeholder="-6.9733" />
+                  <FormField label="Longitude" value={storeLng} onChange={(e) => setStoreLng(parseFloat(e.target.value) || 0)} placeholder="107.6307" />
+                </div>
+                <p className="text-[10px] text-text-tertiary">Buka Google Maps → klik kanan lokasi → salin koordinat. Format: -6.9733, 107.6307</p>
+              </div>
+
+              <button onClick={handleSaveSettings} disabled={settingsLoading} className="w-full bg-primary text-white py-4 rounded-2xl font-bold shadow-lg btn-press flex items-center justify-center gap-2 disabled:opacity-60">
+                {settingsLoading ? <><Loader2 size={18} className="animate-spin" /> Menyimpan...</> : <><CheckCircle2 size={18} /> Simpan Pengaturan</>}
+              </button>
+              <p className="text-[10px] text-text-tertiary text-center">Semua pengaturan disimpan ke server. Perubahan langsung terlihat di semua device user.</p>
             </div>
           )}
         </div>
